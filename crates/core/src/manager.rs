@@ -2,19 +2,21 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use crate::config::ConfigStore;
+use crate::config::{ConfigStore, SettingsFile};
 use crate::engines::{self, InstanceCtx};
 use crate::error::{Error, Result};
 use crate::install::{self, Installer};
 use crate::manifest::{self, Manifest};
 use crate::model::{
-    ConnectionInfo, EngineKind, Instance, InstanceStatus, Issue, IssueSeverity, ProgressEvent,
+    ConnectionInfo, EngineKind, InstalledVersion, Instance, InstanceStatus, Issue, IssueSeverity,
+    ProgressEvent,
 };
 use crate::paths::Paths;
 use crate::ports;
 use crate::preflight;
 use crate::process::direct::DirectBackend;
 use crate::process::{ProcState, ProcessBackend};
+use crate::terminal;
 
 pub struct CreateInstanceRequest {
     pub engine: EngineKind,
@@ -22,6 +24,13 @@ pub struct CreateInstanceRequest {
     pub name: Option<String>,
     pub port: Option<u16>,
     pub autostart: bool,
+}
+
+#[derive(Default)]
+pub struct UpdateInstance {
+    pub name: Option<String>,
+    pub port: Option<u16>,
+    pub autostart: Option<bool>,
 }
 
 /// Facade tingkat tinggi yang dipakai CLI dan (nanti) Tauri commands. Semua
@@ -303,6 +312,171 @@ impl Manager {
         ))
     }
 
+    /// Ubah nama/port/autostart. Kalau instance sedang jalan, port berubah
+    /// artinya stop → update config → start lagi (§12).
+    pub async fn update_instance(
+        &self,
+        id_or_name: &str,
+        patch: UpdateInstance,
+    ) -> Result<Instance> {
+        let instance = self.find_instance(id_or_name)?;
+        let was_running = matches!(
+            self.backend.status(&instance.id).await?,
+            ProcState::Running { .. }
+        );
+
+        if was_running && (patch.port.is_some()) {
+            self.stop(&instance.id).await?;
+        }
+
+        let updated = self.config.with_instances(|file| {
+            if !file.instances.iter().any(|i| i.id == instance.id) {
+                return Err(Error::InstanceNotFound(instance.id.clone()));
+            }
+            if let Some(name) = &patch.name {
+                let taken = file
+                    .instances
+                    .iter()
+                    .any(|i| i.id != instance.id && i.name.eq_ignore_ascii_case(name));
+                if taken {
+                    return Err(Error::DuplicateName(name.clone()));
+                }
+            }
+            if let Some(port) = patch.port {
+                if port < 1024 {
+                    return Err(Error::InvalidPort(port));
+                }
+                let taken = file
+                    .instances
+                    .iter()
+                    .any(|i| i.id != instance.id && i.port == port);
+                if taken {
+                    return Err(Error::PortInUse(port));
+                }
+            }
+
+            let target = file
+                .instances
+                .iter_mut()
+                .find(|i| i.id == instance.id)
+                .expect("sudah divalidasi ada di atas");
+            if let Some(name) = patch.name {
+                target.name = name;
+            }
+            if let Some(port) = patch.port {
+                target.port = port;
+            }
+            if let Some(autostart) = patch.autostart {
+                target.autostart = autostart;
+            }
+            Ok(target.clone())
+        })?;
+
+        if was_running && patch.port.is_some() {
+            self.start(&instance.id, |_| {}).await?;
+        }
+
+        Ok(updated)
+    }
+
+    /// Semua versi engine yang sudah terpasang di disk, dengan ukurannya.
+    pub fn installed_versions(&self) -> Result<Vec<InstalledVersion>> {
+        let mut result = Vec::new();
+        let binaries_dir = self.paths.binaries_dir();
+        let Ok(engine_dirs) = std::fs::read_dir(&binaries_dir) else {
+            return Ok(result);
+        };
+        for engine_entry in engine_dirs.flatten() {
+            let Ok(engine) = engine_entry.file_name().into_string() else {
+                continue;
+            };
+            let Ok(engine) = engine.parse::<EngineKind>() else {
+                continue;
+            };
+            let Ok(version_dirs) = std::fs::read_dir(engine_entry.path()) else {
+                continue;
+            };
+            for version_entry in version_dirs.flatten() {
+                let version_dir = version_entry.path();
+                if !version_dir.join(".installed").exists() {
+                    continue;
+                }
+                let Ok(version) = version_entry.file_name().into_string() else {
+                    continue;
+                };
+                let size_bytes = dir_size(&version_dir);
+                result.push(InstalledVersion {
+                    engine,
+                    version,
+                    size_bytes,
+                });
+            }
+        }
+        Ok(result)
+    }
+
+    /// Hapus versi yang terpasang. Ditolak kalau masih dipakai instance
+    /// manapun (§6).
+    pub fn uninstall_version(&self, engine: EngineKind, version: &str) -> Result<()> {
+        let in_use = self
+            .list_instances()?
+            .iter()
+            .any(|i| i.engine == engine && i.version == version);
+        if in_use {
+            return Err(Error::VersionInUse);
+        }
+        let dir = self.paths.version_dir(engine.as_str(), version);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        Ok(())
+    }
+
+    pub fn get_settings(&self) -> Result<SettingsFile> {
+        self.config.load_settings()
+    }
+
+    pub fn update_settings(&self, settings: SettingsFile) -> Result<SettingsFile> {
+        self.config.save_settings(&settings)?;
+        Ok(settings)
+    }
+
+    /// Buka terminal emulator dengan PATH/env sudah mengarah ke versi
+    /// engine instance ini (§11.1). Mengembalikan petunjuk tambahan yang
+    /// perlu ditampilkan ke pengguna (mis. `redis-cli -p P` untuk Redis).
+    pub fn open_terminal(&self, id_or_name: &str) -> Result<Option<String>> {
+        let instance = self.find_instance(id_or_name)?;
+        let adapter = engines::adapter(instance.engine)?;
+        let ctx = self.ctx_for(&instance);
+        let settings = self.get_settings()?;
+
+        let terminal_cmd = terminal::find_terminal(settings.terminal_command.as_deref())
+            .ok_or_else(|| {
+                Error::Other("tidak menemukan terminal emulator di sistem".to_string())
+            })?;
+        let launch = terminal::build_launch(&terminal_cmd, adapter, &ctx)?;
+
+        std::process::Command::new(&launch.program)
+            .args(&launch.args)
+            .envs(launch.env.iter().cloned())
+            .spawn()?;
+
+        Ok(terminal::connection_hint(instance.engine, instance.port))
+    }
+
+    /// Path folder data instance, dipakai UI untuk "Open data folder".
+    pub fn instance_data_folder(&self, id_or_name: &str) -> Result<std::path::PathBuf> {
+        let instance = self.find_instance(id_or_name)?;
+        Ok(self.paths.instance_dir(&instance.id))
+    }
+
+    pub fn open_data_folder(&self, id_or_name: &str) -> Result<()> {
+        let dir = self.instance_data_folder(id_or_name)?;
+        std::fs::create_dir_all(&dir)?;
+        std::process::Command::new("xdg-open").arg(&dir).spawn()?;
+        Ok(())
+    }
+
     fn ctx_for<'a>(&self, instance: &'a Instance) -> InstanceCtx<'a> {
         let bin_dir = self
             .paths
@@ -322,6 +496,24 @@ impl Manager {
             lib_path,
         }
     }
+}
+
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            total += dir_size(&entry.path());
+        } else {
+            total += metadata.len();
+        }
+    }
+    total
 }
 
 fn generate_id(engine: EngineKind, existing: &[Instance]) -> String {

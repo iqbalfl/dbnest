@@ -11,6 +11,7 @@ pub mod paths;
 pub mod ports;
 pub mod preflight;
 pub mod process;
+pub mod terminal;
 
 pub use error::{Error, Result};
 pub use manager::{CreateInstanceRequest, Manager};
