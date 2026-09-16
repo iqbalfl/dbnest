@@ -88,7 +88,7 @@ fn handle_menu_event(app: &AppHandle, manager: &Arc<CoreManager>, id: &str) {
                 let _ = window.set_focus();
             }
         }
-        "quit" => app.exit(0),
+        "quit" => crate::request_quit(app),
         other => dispatch_instance_action(app, manager, other),
     }
 }

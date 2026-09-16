@@ -19,3 +19,8 @@ export const onInstanceProgress = (handler: (payload: ProgressEventPayload) => v
 
 export const onInstancesChanged = (handler: () => void) =>
   listen<null>("instances://changed", () => handler());
+
+// Hanya dikirim backend saat DirectBackend, karena server yang dikelola
+// systemd tetap hidup lepas dari proses aplikasi (§13.3).
+export const onConfirmQuit = (handler: () => void) =>
+  listen<null>("app://confirm-quit", () => handler());

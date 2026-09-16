@@ -18,10 +18,17 @@ use tauri::Manager as _;
 /// §21 "Tray tidak tampil di GNOME").
 struct TrayAvailable(bool);
 
+/// `true` kalau backend proses saat ini `DirectBackend` — dipakai untuk
+/// memutuskan apakah Quit perlu menawarkan "hentikan semua server?"
+/// (§13.3): hanya relevan untuk DirectBackend, karena server yang dikelola
+/// systemd tetap hidup lepas dari proses aplikasi ini.
+pub struct BackendIsDirect(pub bool);
+
 fn main() {
     tracing_subscriber::fmt::init();
 
     let manager = Arc::new(CoreManager::new().expect("gagal inisialisasi dbnest-core"));
+    let backend_is_direct = manager.is_direct_backend();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -54,6 +61,8 @@ fn main() {
             commands::uninstall_version,
             commands::get_settings,
             commands::update_settings,
+            commands::active_backend,
+            commands::quit_app,
         ])
         .setup(move |app| {
             let tray_available = match tray::setup_tray(app, manager.clone()) {
@@ -66,24 +75,54 @@ fn main() {
                 }
             };
             app.manage(TrayAvailable(tray_available));
+            app.manage(BackendIsDirect(backend_is_direct));
             events::spawn_status_poller(app.handle().clone(), manager.clone());
+
+            // Jalankan instance autostart saat aplikasi/tray dibuka (§9.2).
+            // Untuk SystemdUserBackend ini sebagian besar no-op (systemd
+            // sendiri sudah menjalankannya saat login lewat unit yang
+            // di-enable), tapi tetap aman dipanggil karena start() idempoten.
+            let manager_for_autostart = manager.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = manager_for_autostart.autostart_all().await {
+                    tracing::warn!("autostart_all gagal: {e}");
+                }
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {
             // Menutup jendela hanya menyembunyikannya ke tray (§13.3), dan
             // hanya kalau tray-nya benar-benar ada — kalau tidak, sembunyi
             // ke tray yang tidak ada berarti aplikasi tidak bisa ditutup
-            // sama sekali. Quit sungguhan lewat menu tray "Quit", yang
-            // tidak menghentikan server karena backend saat ini adalah
-            // DirectBackend/systemd, bukan child process aplikasi.
+            // sama sekali, jadi lewatkan ke alur quit yang sama dengan
+            // tray "Quit".
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let tray_available = window.state::<TrayAvailable>().0;
                 if tray_available {
                     let _ = window.hide();
                     api.prevent_close();
+                } else {
+                    api.prevent_close();
+                    request_quit(window.app_handle());
                 }
             }
         })
         .run(tauri::generate_context!())
         .expect("error saat menjalankan aplikasi tauri");
+}
+
+/// Titik keluar tunggal untuk Quit (tray atau, kalau tray tidak ada, tombol
+/// tutup jendela). Backend systemd tidak menghentikan server lepas dari
+/// proses aplikasi, jadi langsung keluar; DirectBackend tidak diawasi
+/// siapa pun kalau aplikasi ditutup, jadi tanya dulu lewat frontend
+/// (`app://confirm-quit` → `window.confirm()` → command `quit_app`).
+pub(crate) fn request_quit(app: &tauri::AppHandle) {
+    use tauri::{Emitter, Manager as _};
+    let backend_is_direct = app.state::<BackendIsDirect>().0;
+    if backend_is_direct {
+        let _ = app.emit("app://confirm-quit", ());
+    } else {
+        app.exit(0);
+    }
 }

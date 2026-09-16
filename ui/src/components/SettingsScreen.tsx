@@ -11,6 +11,7 @@ interface Props {
 export default function SettingsScreen({ onClose, onError }: Props) {
   const [settings, setSettings] = useState<SettingsFile | null>(null);
   const [versions, setVersions] = useState<InstalledVersion[]>([]);
+  const [activeBackend, setActiveBackend] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const load = () => {
@@ -19,6 +20,7 @@ export default function SettingsScreen({ onClose, onError }: Props) {
       .listInstalledVersions()
       .then(setVersions)
       .catch((e) => onError(errorMessage(e)));
+    void api.activeBackend().then(setActiveBackend).catch(() => undefined);
   };
 
   useEffect(load, []);
@@ -99,6 +101,12 @@ export default function SettingsScreen({ onClose, onError }: Props) {
           <option value="systemd">systemd</option>
           <option value="direct">Direct</option>
         </select>
+        {activeBackend && (
+          <p className="hint-text">
+            Backend aktif saat ini: <code>{activeBackend}</code>. Perubahan di atas berlaku
+            setelah aplikasi dijalankan ulang.
+          </p>
+        )}
         <p className="hint-text">
           Tips: agar server tetap berjalan setelah logout (bukan cuma setelah login), jalankan{" "}
           <code>loginctl enable-linger $USER</code>.

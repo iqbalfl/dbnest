@@ -67,4 +67,9 @@ export const api = {
 
   updateSettings: (settings: SettingsFile) =>
     invoke<SettingsFile>("update_settings", { settings }),
+
+  quitApp: (stopServers: boolean) =>
+    invoke<void>("quit_app", { stopServers }),
+
+  activeBackend: () => invoke<string>("active_backend"),
 };
