@@ -1,0 +1,302 @@
+# Membangun binary engine yang belum punya tarball resmi untuk Linux (Redis dan
+# PostgreSQL, lihat DESIGN.md §5.2), lalu mengisi manifest dengan url dan sha256
+# hasil build itu — persis alur `build-engines.yml` di DESIGN.md §19.
+#
+# Semua build berjalan di container AlmaLinux 8 (glibc 2.28) supaya hasilnya
+# tetap jalan di distro lama yang didukung README. `scripts/check-portable.sh`
+# menjaga janji itu: build gagal kalau ada binary yang menuntut glibc lebih baru
+# atau menaut library yang SONAME-nya berbeda antar distro.
+#
+# DESIGN.md menempatkan workflow ini di repo terpisah `dbnest-engines`. Di sini
+# ia dipasang di repo yang sama supaya bisa langsung dijalankan; kalau nanti
+# repo engine dipisah, berkas ini bisa dipindahkan apa adanya — yang perlu
+# diubah hanya tujuan PR manifest.
+#
+# Prasyarat: Settings -> Actions -> General -> "Allow GitHub Actions to create
+# and approve pull requests" harus aktif supaya langkah PR manifest berhasil.
+name: Build engines
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: Engine yang dibangun
+        type: choice
+        options: [both, redis, postgres]
+        default: both
+      redis_version:
+        description: Versi Redis
+        default: "7.4.0"
+      postgres_version:
+        description: Versi PostgreSQL
+        default: "16.4"
+      redis_src_sha256:
+        description: >-
+          sha256 tarball sumber Redis. Kosong = hanya dicatat, diisi = wajib cocok.
+        default: ""
+      publish:
+        description: Unggah ke Releases dan buka PR manifest
+        type: boolean
+        default: true
+
+env:
+  # Distro tertua yang didukung README (Ubuntu 20.04, Debian 11, RHEL 8).
+  MAX_GLIBC: "2.28"
+
+jobs:
+  redis:
+    name: Redis ${{ inputs.redis_version }} (x86_64)
+    if: inputs.engine == 'both' || inputs.engine == 'redis'
+    runs-on: ubuntu-24.04
+    container: almalinux:8
+    steps:
+      - name: Install build dependencies
+        run: dnf -y install gcc make tar gzip git curl file findutils binutils
+
+      - uses: actions/checkout@v4
+
+      - name: Download source
+        env:
+          VERSION: ${{ inputs.redis_version }}
+          EXPECTED: ${{ inputs.redis_src_sha256 }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o redis-src.tar.gz \
+            "https://download.redis.io/releases/redis-${VERSION}.tar.gz"
+          ACTUAL="$(sha256sum redis-src.tar.gz | cut -d' ' -f1)"
+          echo "sha256 tarball sumber: $ACTUAL"
+          if [ -n "$EXPECTED" ]; then
+            if [ "$ACTUAL" != "$EXPECTED" ]; then
+              echo "::error::sha256 sumber $ACTUAL, diharapkan $EXPECTED"
+              exit 1
+            fi
+            echo "sha256 sumber cocok dengan input."
+          else
+            echo "::warning::Upstream Redis tidak menerbitkan berkas checksum" \
+                 "yang bisa diambil otomatis, jadi sumber ini TIDAK diverifikasi." \
+                 "Cocokkan $ACTUAL dengan https://redis.io/downloads/ lalu isikan" \
+                 "ke input redis_src_sha256 pada build berikutnya."
+          fi
+          mkdir -p src
+          tar -xzf redis-src.tar.gz -C src --strip-components=1
+
+      - name: Build
+        env:
+          VERSION: ${{ inputs.redis_version }}
+        run: |
+          set -euo pipefail
+          NAME="redis-${VERSION}-x86_64-linux-gnu"
+          echo "STAGE=/out/$NAME" >> "$GITHUB_ENV"
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+          cd src
+          make BUILD_TLS=no -j"$(nproc)"
+          make BUILD_TLS=no PREFIX="/out/$NAME" install
+
+      - name: Check portability
+        run: ./scripts/check-portable.sh "$STAGE"
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          "$STAGE/bin/redis-server" --port 56379 --daemonize yes --dir /tmp
+          for _ in $(seq 1 30); do
+            if "$STAGE/bin/redis-cli" -p 56379 ping 2>/dev/null | grep -q PONG; then
+              break
+            fi
+            sleep 1
+          done
+          "$STAGE/bin/redis-cli" -p 56379 ping | grep -q PONG
+          "$STAGE/bin/redis-cli" -p 56379 shutdown nosave 2>/dev/null || true
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          tar -czf "${NAME}.tar.gz" -C /out "$NAME"
+          sha256sum "${NAME}.tar.gz" | tee "${NAME}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-redis-${{ inputs.redis_version }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+
+  postgres:
+    name: PostgreSQL ${{ inputs.postgres_version }} (x86_64)
+    if: inputs.engine == 'both' || inputs.engine == 'postgres'
+    runs-on: ubuntu-24.04
+    container: almalinux:8
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf -y install gcc make bison flex perl zlib-devel \
+            tar gzip bzip2 git curl file findutils binutils diffutils
+
+      - uses: actions/checkout@v4
+
+      - name: Download and verify source
+        env:
+          VERSION: ${{ inputs.postgres_version }}
+        run: |
+          set -euo pipefail
+          BASE="https://ftp.postgresql.org/pub/source/v${VERSION}"
+          curl -fsSL -o "postgresql-${VERSION}.tar.bz2" "${BASE}/postgresql-${VERSION}.tar.bz2"
+          # PostgreSQL menerbitkan sha256 resmi di direktori yang sama, jadi
+          # sumbernya benar-benar diverifikasi (bukan sekadar dicatat).
+          curl -fsSL -o expected.sha256 "${BASE}/postgresql-${VERSION}.tar.bz2.sha256"
+          echo "checksum resmi: $(cat expected.sha256)"
+          sha256sum -c expected.sha256
+          mkdir -p src
+          tar -xjf "postgresql-${VERSION}.tar.bz2" -C src --strip-components=1
+
+      - name: Build
+        env:
+          VERSION: ${{ inputs.postgres_version }}
+        run: |
+          set -euo pipefail
+          NAME="postgres-${VERSION}-x86_64-linux-gnu"
+          echo "STAGE=/out/$NAME" >> "$GITHUB_ENV"
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+          cd src
+          # Tanpa ICU, readline, dan OpenSSL: SONAME ketiganya berbeda antara
+          # EL8 dan Ubuntu 24.04, jadi menautnya justru membuat binary tidak
+          # portabel. zlib tetap dipakai (libz.so.1 stabil di mana-mana).
+          # --disable-rpath supaya pencarian library ikut LD_LIBRARY_PATH yang
+          # dipasang adapter, bukan path absolut saat build.
+          ./configure \
+            --prefix="/out/$NAME" \
+            --without-icu \
+            --without-readline \
+            --without-openssl \
+            --with-zlib \
+            --disable-rpath
+          make -j"$(nproc)" world-bin
+          make install-world-bin
+
+      - name: Check portability
+        run: ./scripts/check-portable.sh "$STAGE"
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          # postgres menolak berjalan sebagai root, jadi tes dijalankan sebagai
+          # user biasa — sekaligus membuktikan pohon ini relokatabel.
+          useradd -m pgtest
+          cp -a "$STAGE" /home/pgtest/pg
+          chown -R pgtest /home/pgtest
+          su pgtest -s /bin/bash -c '
+            set -euo pipefail
+            export LD_LIBRARY_PATH=/home/pgtest/pg/lib
+            B=/home/pgtest/pg/bin
+            "$B/initdb" -D /home/pgtest/data -U postgres --auth=trust \
+              --encoding=UTF8 --no-locale
+            "$B/pg_ctl" -D /home/pgtest/data -w \
+              -o "-p 55432 -k /tmp -c listen_addresses=127.0.0.1" start
+            "$B/psql" -h 127.0.0.1 -p 55432 -U postgres -c "select version()"
+            "$B/pg_ctl" -D /home/pgtest/data -w stop
+          '
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          tar -czf "${NAME}.tar.gz" -C /out "$NAME"
+          sha256sum "${NAME}.tar.gz" | tee "${NAME}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-postgres-${{ inputs.postgres_version }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+
+  publish:
+    name: Publish and update manifest
+    needs: [redis, postgres]
+    if: >-
+      always() && inputs.publish &&
+      (needs.redis.result == 'success' || needs.postgres.result == 'success')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: engine-*
+
+      - name: Publish releases and patch manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for dir in artifacts/engine-*; do
+            [ -d "$dir" ] || continue
+            rest="$(basename "$dir")"; rest="${rest#engine-}"
+            ENGINE="${rest%%-*}"
+            VERSION="${rest#*-}"
+            TAG="engines-${ENGINE}-${VERSION}"
+            TARBALL="$(find "$dir" -name '*.tar.gz' -print -quit)"
+            if [ -z "$TARBALL" ]; then
+              echo "::error::tidak ada tarball di $dir"
+              exit 1
+            fi
+            SHA="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
+            FILE="$(basename "$TARBALL")"
+
+            # Rilis harus terbit (bukan draft): URL unduhan draft tidak bisa
+            # diakses publik, sedangkan manifest akan menunjuk ke URL itu.
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" "$TARBALL" --clobber
+            else
+              cat > notes.md <<NOTES
+          Build ${ENGINE} ${VERSION} untuk x86_64, dikompilasi di AlmaLinux 8
+          (glibc ${MAX_GLIBC}) lewat alur build-engines.yml.
+
+          sha256: \`${SHA}\`
+          NOTES
+              gh release create "$TAG" "$TARBALL" \
+                --title "$ENGINE $VERSION" \
+                --notes-file notes.md
+            fi
+
+            URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${FILE}"
+            python3 scripts/update_manifest.py \
+              --engine "$ENGINE" --version "$VERSION" --arch x86_64 \
+              --url "$URL" --sha256 "$SHA"
+          done
+
+      - name: Open manifest pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- manifest/manifest.json; then
+            echo "manifest sudah mutakhir, tidak ada PR yang dibuka."
+            exit 0
+          fi
+          BRANCH="engines/manifest-${GITHUB_RUN_ID}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add manifest/manifest.json
+          git commit \
+            -m "Perbarui manifest dari build engine" \
+            -m "Diisi otomatis oleh build-engines.yml run ${GITHUB_RUN_ID}."
+          git push -u origin "$BRANCH"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          cat > body.md <<BODY
+          Diisi otomatis oleh [build-engines.yml run \`${GITHUB_RUN_ID}\`](${RUN_URL}).
+
+          url dan sha256 diambil dari tarball yang baru diunggah ke Releases.
+          Tiap tarball sudah lolos \`scripts/check-portable.sh\` dan smoke test
+          di AlmaLinux 8.
+
+          ---
+          _Generated by [Claude Code](https://claude.ai/code)_
+          BODY
+          gh pr create \
+            --title "Perbarui manifest dari build engine" \
+            --body-file body.md
