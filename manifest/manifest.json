@@ -51,6 +51,58 @@
           }
         }
       ]
+    },
+    "mysql": {
+      "display_name": "MySQL",
+      "default_port": 3306,
+      "versions": [
+        {
+          "version": "8.4.3",
+          "channel": "stable",
+          "verified": false,
+          "artifacts": {
+            "x86_64": {
+              "url": "TODO",
+              "sha256": "TODO",
+              "format": "tar.xz",
+              "strip_components": 1,
+              "min_glibc": "2.28"
+            },
+            "aarch64": {
+              "url": "TODO",
+              "sha256": "TODO",
+              "format": "tar.xz",
+              "strip_components": 1,
+              "min_glibc": "2.28"
+            }
+          }
+        }
+      ]
+    },
+    "mariadb": {
+      "display_name": "MariaDB",
+      "default_port": 3306,
+      "versions": [
+        {
+          "version": "11.4.4",
+          "channel": "stable",
+          "verified": false,
+          "artifacts": {
+            "x86_64": {
+              "url": "TODO",
+              "sha256": "TODO",
+              "format": "tar.gz",
+              "strip_components": 1
+            },
+            "aarch64": {
+              "url": "TODO",
+              "sha256": "TODO",
+              "format": "tar.gz",
+              "strip_components": 1
+            }
+          }
+        }
+      ]
     }
   }
 }

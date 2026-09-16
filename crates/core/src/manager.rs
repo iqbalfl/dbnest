@@ -7,9 +7,12 @@ use crate::engines::{self, InstanceCtx};
 use crate::error::{Error, Result};
 use crate::install::{self, Installer};
 use crate::manifest::{self, Manifest};
-use crate::model::{ConnectionInfo, EngineKind, Instance, InstanceStatus, ProgressEvent};
+use crate::model::{
+    ConnectionInfo, EngineKind, Instance, InstanceStatus, Issue, IssueSeverity, ProgressEvent,
+};
 use crate::paths::Paths;
 use crate::ports;
+use crate::preflight;
 use crate::process::direct::DirectBackend;
 use crate::process::{ProcState, ProcessBackend};
 
@@ -140,13 +143,27 @@ impl Manager {
                     instance.engine,
                     &instance.version,
                     artifact,
-                    |dir| adapter.post_install(dir),
+                    |dir| adapter.post_install(dir, &self.paths),
                     |e| on_event(ProgressEvent::Install(e)),
                 )
                 .await?;
         }
 
         let ctx = self.ctx_for(&instance);
+
+        on_event(ProgressEvent::Preflight);
+        let already_running = matches!(
+            self.backend.status(&instance.id).await?,
+            ProcState::Running { .. }
+        );
+        let issues = preflight::check(&self.paths, &instance, &ctx, adapter, already_running);
+        if let Some(blocking) = issues.iter().find(|i| i.severity == IssueSeverity::Error) {
+            let message = blocking.message.clone();
+            on_event(ProgressEvent::Failed {
+                message: message.clone(),
+            });
+            return Err(Error::PreflightFailed(message));
+        }
 
         if !adapter.is_initialized(&ctx) {
             on_event(ProgressEvent::Initializing);
@@ -267,11 +284,34 @@ impl Manager {
             .ok_or_else(|| Error::Other("tidak ada port kosong tersedia".to_string()))
     }
 
+    /// Jalankan preflight (§8.1) untuk instance ini tanpa menginstall atau
+    /// menjalankannya. Dipakai oleh `dbnest doctor` dan banner UI.
+    pub async fn preflight(&self, id_or_name: &str) -> Result<Vec<Issue>> {
+        let instance = self.find_instance(id_or_name)?;
+        let adapter = engines::adapter(instance.engine)?;
+        let ctx = self.ctx_for(&instance);
+        let already_running = matches!(
+            self.backend.status(&instance.id).await?,
+            ProcState::Running { .. }
+        );
+        Ok(preflight::check(
+            &self.paths,
+            &instance,
+            &ctx,
+            adapter,
+            already_running,
+        ))
+    }
+
     fn ctx_for<'a>(&self, instance: &'a Instance) -> InstanceCtx<'a> {
         let bin_dir = self
             .paths
             .version_dir(instance.engine.as_str(), &instance.version);
-        let lib_path = vec![bin_dir.join("lib")];
+        // `compat-lib/` (§8.2) adalah satu-satunya bagian dari
+        // LD_LIBRARY_PATH yang bersifat lintas-engine; sisanya (mis.
+        // `bin/lib` Postgres atau `bin/lib/private` MySQL) dihitung sendiri
+        // oleh masing-masing adapter.
+        let lib_path = vec![self.paths.compat_lib_dir()];
         InstanceCtx {
             instance,
             bin_dir,

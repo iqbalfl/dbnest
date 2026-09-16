@@ -61,6 +61,8 @@ enum Commands {
         #[arg(long)]
         keep_data: bool,
     },
+    /// Jalankan preflight untuk semua instance + info sistem.
+    Doctor,
 }
 
 #[derive(Serialize)]
@@ -129,6 +131,7 @@ async fn run(cli: Cli) -> dbnest_core::Result<()> {
         Commands::Logs { id, lines } => cmd_logs(&manager, cli.json, &id, lines),
         Commands::Info { id } => cmd_info(&manager, cli.json, &id),
         Commands::Delete { id, keep_data } => cmd_delete(&manager, cli.json, &id, keep_data).await,
+        Commands::Doctor => cmd_doctor(&manager, cli.json).await,
     }
 }
 
@@ -258,6 +261,7 @@ fn print_progress_event(event: &ProgressEvent) {
         ProgressEvent::Install(InstallEvent::Failed { message }) => {
             eprintln!("instalasi gagal: {message}")
         }
+        ProgressEvent::Preflight => println!("menjalankan preflight..."),
         ProgressEvent::Initializing => println!("menginisialisasi data directory..."),
         ProgressEvent::Starting => println!("menjalankan proses..."),
         ProgressEvent::HealthCheck => println!("menunggu server siap..."),
@@ -374,6 +378,78 @@ async fn cmd_delete(
     manager.delete_instance(id, !keep_data).await?;
     if !json {
         println!("{id}: dihapus");
+    }
+    Ok(())
+}
+
+async fn cmd_doctor(manager: &Manager, json: bool) -> dbnest_core::Result<()> {
+    let system = dbnest_core::preflight::system_info();
+    let instances = manager.list_instances()?;
+
+    let mut report = Vec::with_capacity(instances.len());
+    for instance in &instances {
+        let issues = manager.preflight(&instance.id).await?;
+        report.push((instance.clone(), issues));
+    }
+
+    if json {
+        #[derive(Serialize)]
+        struct DoctorReport {
+            system: dbnest_core::preflight::SystemInfo,
+            instances: Vec<InstanceIssues>,
+        }
+        #[derive(Serialize)]
+        struct InstanceIssues {
+            instance: Instance,
+            issues: Vec<dbnest_core::model::Issue>,
+        }
+        let payload = DoctorReport {
+            system,
+            instances: report
+                .into_iter()
+                .map(|(instance, issues)| InstanceIssues { instance, issues })
+                .collect(),
+        };
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!("sistem   : {} ({})", system.os_id, system.os_version);
+    println!("arsitektur: {}", system.arch);
+    println!(
+        "root?    : {}",
+        if system.running_as_root {
+            "YA (masalah!)"
+        } else {
+            "tidak"
+        }
+    );
+    println!();
+
+    if report.is_empty() {
+        println!("Belum ada instance untuk diperiksa.");
+        return Ok(());
+    }
+
+    for (instance, issues) in report {
+        println!(
+            "{} ({} {}, port {})",
+            instance.id, instance.engine, instance.version, instance.port
+        );
+        if issues.is_empty() {
+            println!("  OK, tidak ada masalah");
+        }
+        for issue in issues {
+            let tag = match issue.severity {
+                dbnest_core::model::IssueSeverity::Error => "ERROR",
+                dbnest_core::model::IssueSeverity::Warning => "WARN ",
+                dbnest_core::model::IssueSeverity::Info => "INFO ",
+            };
+            println!("  [{tag}] {}", issue.message);
+            if let Some(hint) = &issue.fix_hint {
+                println!("         hint: {hint}");
+            }
+        }
     }
     Ok(())
 }

@@ -81,6 +81,76 @@ async fn postgres_full_lifecycle() {
     full_lifecycle(EngineKind::Postgres, "16.4").await;
 }
 
+#[tokio::test]
+#[ignore]
+async fn mysql_full_lifecycle() {
+    require_it_flag();
+    full_lifecycle(EngineKind::Mysql, "8.4.3").await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mariadb_full_lifecycle() {
+    require_it_flag();
+    full_lifecycle(EngineKind::Mariadb, "11.4.4").await;
+}
+
+/// Dua instance MySQL berjalan bersamaan tanpa bentrok port 33060, karena
+/// adapter selalu menambahkan `--mysqlx=OFF` (kriteria selesai Milestone 2).
+#[tokio::test]
+#[ignore]
+async fn two_mysql_instances_run_concurrently() {
+    require_it_flag();
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::under_root(tmp.path());
+    let manager = Manager::with_paths(paths).unwrap();
+
+    let manifest = manager.manifest().unwrap();
+    let verified = manifest
+        .version_entry(EngineKind::Mysql, "8.4.3")
+        .map(|v| v.verified)
+        .unwrap_or(false);
+    if !verified {
+        panic!("versi MySQL 8.4.3 belum diverifikasi di manifest/manifest.json");
+    }
+
+    let a = manager
+        .create_instance(CreateInstanceRequest {
+            engine: EngineKind::Mysql,
+            version: "8.4.3".to_string(),
+            name: Some("my-a".to_string()),
+            port: Some(13306),
+            autostart: false,
+        })
+        .unwrap();
+    let b = manager
+        .create_instance(CreateInstanceRequest {
+            engine: EngineKind::Mysql,
+            version: "8.4.3".to_string(),
+            name: Some("my-b".to_string()),
+            port: Some(13307),
+            autostart: false,
+        })
+        .unwrap();
+
+    manager.start(&a.id, |_| {}).await.unwrap();
+    manager.start(&b.id, |_| {}).await.unwrap();
+
+    assert!(matches!(
+        manager.status(&a.id).await.unwrap(),
+        InstanceStatus::Running { .. }
+    ));
+    assert!(matches!(
+        manager.status(&b.id).await.unwrap(),
+        InstanceStatus::Running { .. }
+    ));
+
+    manager.stop(&a.id).await.unwrap();
+    manager.stop(&b.id).await.unwrap();
+    manager.delete_instance(&a.id, true).await.unwrap();
+    manager.delete_instance(&b.id, true).await.unwrap();
+}
+
 /// Dua instance PostgreSQL versi sama di port berbeda harus bisa berjalan
 /// bersamaan (kriteria selesai Milestone 1).
 #[tokio::test]
