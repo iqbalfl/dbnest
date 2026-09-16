@@ -27,14 +27,10 @@ jobs:
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
-          # webkit2gtk-4.1 di 24.04, 4.0 di 22.04.
-          if [ "${{ matrix.os }}" = "ubuntu-22.04" ]; then
-            WEBKIT=libwebkit2gtk-4.0-dev
-          else
-            WEBKIT=libwebkit2gtk-4.1-dev
-          fi
+          # Tauri v2 selalu butuh webkit2gtk-4.1 (yang 4.0 hanya untuk v1).
+          # Paketnya tersedia di 22.04 maupun 24.04.
           sudo apt-get install -y \
-            "$WEBKIT" \
+            libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \

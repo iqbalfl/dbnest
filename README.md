@@ -145,14 +145,15 @@ Tes ini baru bisa lulus setelah manifest berisi artefak terverifikasi.
 
 ### Dependensi sistem untuk membangun GUI
 
-Ubuntu 24.04:
+Ubuntu 22.04 dan 24.04:
 
 ```bash
 sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev \
   libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev patchelf
 ```
 
-Di Ubuntu 22.04, pakai `libwebkit2gtk-4.0-dev`.
+Tauri v2 butuh webkit2gtk **4.1** (paket `-4.0-dev` hanya untuk Tauri v1).
+Untuk mem-bundle AppImage, tambahkan `xdg-utils`.
 
 ### Struktur
 
