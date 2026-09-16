@@ -107,6 +107,9 @@ export interface Manifest {
   engines: Record<string, EngineCatalog>;
 }
 
+// Dari mana manifest yang sedang dipakai berasal (§5.3).
+export type ManifestSource = "cache" | "embedded";
+
 // { code, message, hint? } — bentuk error command Tauri (§13.1).
 export interface CommandError {
   code: string;

@@ -1,0 +1,123 @@
+# CI sesuai DESIGN.md §18: build + unit test di Ubuntu 22.04 dan 24.04,
+# fmt/clippy wajib lulus, frontend di-typecheck, plus smoke test CLI di
+# container Fedora.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Dipakai untuk menjalankan job integrasi secara manual (lihat di bawah).
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          # Tauri v2 selalu butuh webkit2gtk-4.1 (yang 4.0 hanya untuk v1).
+          # Paketnya tersedia di 22.04 maupun 24.04.
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Kunci cache bawaan hanya memuat nama job ("rust") dan "Linux-x64",
+          # jadi kedua leg matrix memakai entri yang sama dan saling menimpa
+          # target dir. `key` memisahkan cache per versi Ubuntu.
+          key: ${{ matrix.os }}
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Unit tests
+        run: cargo test --workspace
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install
+        working-directory: ui
+        run: npm ci
+
+      - name: Typecheck and build
+        working-directory: ui
+        run: npm run build
+
+  cli-smoke-fedora:
+    name: CLI smoke test (Fedora)
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: dnf install -y cargo rust gcc
+
+      # Hanya CLI: crate GUI butuh webkit2gtk yang tidak perlu diuji di sini.
+      - name: Build CLI
+        run: cargo build -p dbnest-cli
+
+      - name: Smoke test
+        run: |
+          export XDG_DATA_HOME="$PWD/.smoke/data"
+          export XDG_CONFIG_HOME="$PWD/.smoke/config"
+          export XDG_CACHE_HOME="$PWD/.smoke/cache"
+          export XDG_STATE_HOME="$PWD/.smoke/state"
+          ./target/debug/dbnest --help
+          ./target/debug/dbnest engines
+          ./target/debug/dbnest list
+          ./target/debug/dbnest versions
+          ./target/debug/dbnest doctor
+
+  # Tes integrasi mengunduh binary engine sungguhan, jadi hanya jalan kalau
+  # manifest sudah berisi artefak terverifikasi (lihat README). Sampai saat
+  # itu job ini dijalankan manual lewat workflow_dispatch.
+  integration:
+    name: Integration tests (opt-in)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Redis and PostgreSQL lifecycle
+        env:
+          DBNEST_IT: "1"
+        run: cargo test -p dbnest-core -- --ignored

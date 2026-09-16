@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 pub use dbnest_core::Manager as CoreManager;
 
-use tauri::Manager as _;
+use tauri::{Emitter as _, Manager as _};
 
 /// Disimpan sebagai state supaya `on_window_event` tahu apakah tray
 /// berhasil dibuat. Kalau tidak (mis. GNOME tanpa ekstensi AppIndicator,
@@ -45,6 +45,8 @@ fn main() {
         .manage(manager.clone())
         .invoke_handler(tauri::generate_handler![
             commands::list_engines,
+            commands::refresh_manifest,
+            commands::manifest_source,
             commands::list_instances,
             commands::create_instance,
             commands::update_instance,
@@ -86,6 +88,21 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = manager_for_autostart.autostart_all().await {
                     tracing::warn!("autostart_all gagal: {e}");
+                }
+            });
+
+            // Segarkan manifest di latar belakang saat aplikasi dibuka
+            // (§5.3). Gagalnya tidak diangkat ke pengguna — aplikasi tetap
+            // jalan dengan cache/embedded; hanya "Refresh versions" manual
+            // yang melaporkan error.
+            let manager_for_manifest = manager.clone();
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match manager_for_manifest.refresh_manifest().await {
+                    Ok(_) => {
+                        let _ = app_handle.emit("manifest://changed", ());
+                    }
+                    Err(e) => tracing::info!("manifest tidak disegarkan: {e}"),
                 }
             });
 

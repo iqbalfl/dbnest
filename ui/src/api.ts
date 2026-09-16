@@ -9,6 +9,7 @@ import type {
   Issue,
   InstalledVersion,
   Manifest,
+  ManifestSource,
   SettingsFile,
 } from "./types";
 
@@ -28,6 +29,10 @@ export interface UpdateInstanceArgs {
 
 export const api = {
   listEngines: () => invoke<Manifest>("list_engines"),
+
+  refreshManifest: () => invoke<Manifest>("refresh_manifest"),
+
+  manifestSource: () => invoke<ManifestSource>("manifest_source"),
 
   listInstances: () => invoke<InstanceView[]>("list_instances"),
 

@@ -78,14 +78,10 @@ pub fn connection_hint(engine: EngineKind, port: u16) -> Option<String> {
     }
 }
 
-/// Siapkan program, argumen, dan environment untuk membuka `terminal_cmd`
-/// dengan PATH/env yang sudah mengarah ke versi engine yang benar.
-pub fn build_launch(
-    terminal_cmd: &str,
-    adapter: &dyn EngineAdapter,
-    ctx: &InstanceCtx,
-) -> Result<TerminalLaunch> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+/// Environment untuk bekerja dengan satu instance: PATH sudah diawali
+/// direktori client engine-nya, plus variabel koneksi per engine (§11.1).
+/// Dipakai "Open Terminal" di GUI maupun `dbnest shell` / `dbnest env`.
+pub fn instance_env(adapter: &dyn EngineAdapter, ctx: &InstanceCtx) -> Vec<(String, String)> {
     let bin_dirs = adapter.client_bin_dirs(&ctx.bin_dir);
     let existing_path = std::env::var("PATH").unwrap_or_default();
 
@@ -113,7 +109,24 @@ pub fn build_launch(
         }
         EngineKind::Redis | EngineKind::Mongodb => {}
     }
+    env
+}
 
+/// Shell login pengguna, untuk `dbnest shell` dan sebagai program yang
+/// dijalankan di dalam terminal emulator.
+pub fn user_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
+/// Siapkan program, argumen, dan environment untuk membuka `terminal_cmd`
+/// dengan PATH/env yang sudah mengarah ke versi engine yang benar.
+pub fn build_launch(
+    terminal_cmd: &str,
+    adapter: &dyn EngineAdapter,
+    ctx: &InstanceCtx,
+) -> Result<TerminalLaunch> {
+    let shell = user_shell();
+    let env = instance_env(adapter, ctx);
     let args = shell_invocation_args(terminal_cmd, &shell);
     Ok(TerminalLaunch {
         program: PathBuf::from(terminal_cmd),

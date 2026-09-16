@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use dbnest_core::config::SettingsFile;
 use dbnest_core::manager::{CreateInstanceRequest, UpdateInstance};
-use dbnest_core::manifest::Manifest;
+use dbnest_core::manifest::{Manifest, ManifestSource};
 use dbnest_core::model::{
     EngineKind, InstalledVersion, Instance, InstanceView, Issue, ProgressEvent,
 };
@@ -61,6 +61,20 @@ struct ProgressPayload<'a> {
 #[tauri::command]
 pub fn list_engines(manager: State<'_, Arc<CoreManager>>) -> CmdResult<Manifest> {
     Ok(manager.manifest()?)
+}
+
+/// Unduh ulang manifest dari `settings.manifest_url` (§5.3). Dipakai tombol
+/// "Refresh versions"; error sengaja dikembalikan apa adanya supaya
+/// pengguna tahu kalau unduhannya gagal, bukan diam-diam pakai yang lama.
+#[tauri::command]
+pub async fn refresh_manifest(manager: State<'_, Arc<CoreManager>>) -> CmdResult<Manifest> {
+    Ok(manager.refresh_manifest().await?)
+}
+
+/// `"cache"` (hasil unduhan terakhir) atau `"embedded"` (bawaan binary).
+#[tauri::command]
+pub fn manifest_source(manager: State<'_, Arc<CoreManager>>) -> CmdResult<ManifestSource> {
+    Ok(manager.manifest_source()?)
 }
 
 #[tauri::command]
