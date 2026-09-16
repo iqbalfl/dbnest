@@ -1,0 +1,32 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Kapabilitas jendela utama DBnest: command aplikasi sendiri (tidak butuh entri ACL terpisah), window dasar, opener terbatas pada skema koneksi database + folder data instance, dan autostart aplikasi.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:event:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "http://**" },
+        { "url": "https://**" },
+        { "url": "postgresql://**" },
+        { "url": "mysql://**" },
+        { "url": "redis://**" },
+        { "url": "mongodb://**" }
+      ]
+    },
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        { "path": "$APPDATA/instances/**" },
+        { "path": "$APPLOCALDATA/instances/**" }
+      ]
+    },
+    "autostart:default"
+  ]
+}
