@@ -1,3 +1,6 @@
+pub mod mariadb;
+pub mod mysql;
+mod mysql_family;
 pub mod postgres;
 pub mod redis;
 
@@ -6,6 +9,7 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 use crate::model::{ConnectionInfo, EngineKind, Instance};
+use crate::paths::Paths;
 
 pub struct InstanceCtx<'a> {
     pub instance: &'a Instance,
@@ -47,23 +51,36 @@ pub trait EngineAdapter: Send + Sync {
     async fn health_check(&self, ctx: &InstanceCtx) -> Result<bool>;
     fn connection_info(&self, ctx: &InstanceCtx) -> ConnectionInfo;
 
-    /// Dipanggil setelah binary diekstrak.
-    fn post_install(&self, _bin_dir: &Path) -> Result<()> {
+    /// Dipanggil setelah binary diekstrak. `paths` diberikan karena
+    /// beberapa engine (mis. MySQL) perlu menyiapkan sesuatu di luar
+    /// `bin_dir`, seperti symlink kompatibilitas library (§8.2).
+    fn post_install(&self, _bin_dir: &Path, _paths: &Paths) -> Result<()> {
         Ok(())
     }
 }
 
+/// Gabungkan beberapa direktori jadi satu nilai `LD_LIBRARY_PATH`.
+pub fn join_lib_path(dirs: &[PathBuf]) -> String {
+    dirs.iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 /// Registry adapter per engine. Engine yang belum diimplementasikan
-/// (MySQL/MariaDB di Milestone 2, MongoDB di Milestone 5) mengembalikan
-/// error yang jelas alih-alih panic.
+/// (MongoDB di Milestone 5) mengembalikan error yang jelas alih-alih panic.
 pub fn adapter(kind: EngineKind) -> Result<&'static dyn EngineAdapter> {
     static REDIS: redis::RedisAdapter = redis::RedisAdapter;
     static POSTGRES: postgres::PostgresAdapter = postgres::PostgresAdapter;
+    static MYSQL: mysql::MysqlAdapter = mysql::MysqlAdapter;
+    static MARIADB: mariadb::MariadbAdapter = mariadb::MariadbAdapter;
     match kind {
         EngineKind::Redis => Ok(&REDIS),
         EngineKind::Postgres => Ok(&POSTGRES),
-        EngineKind::Mysql | EngineKind::Mariadb | EngineKind::Mongodb => Err(Error::Other(
-            format!("engine {kind} belum didukung pada milestone ini"),
-        )),
+        EngineKind::Mysql => Ok(&MYSQL),
+        EngineKind::Mariadb => Ok(&MARIADB),
+        EngineKind::Mongodb => Err(Error::Other(format!(
+            "engine {kind} belum didukung pada milestone ini"
+        ))),
     }
 }

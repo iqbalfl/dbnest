@@ -120,6 +120,7 @@ pub enum InstallEvent {
 
 #[derive(Serialize, Clone, Debug)]
 pub enum ProgressEvent {
+    Preflight,
     Install(InstallEvent),
     Initializing,
     Starting,
