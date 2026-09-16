@@ -1,0 +1,138 @@
+//! Tes integrasi menyeluruh: install → create → start → health → stop →
+//! delete, untuk Redis dan PostgreSQL (DESIGN.md §18).
+//!
+//! Ditandai `#[ignore]` karena mengunduh binary asli dan menjalankan server
+//! sungguhan. Jalankan dengan:
+//!   DBNEST_IT=1 cargo test -p dbnest-core -- --ignored
+//!
+//! Prasyarat: entri versi terkait di `manifest/manifest.json` harus
+//! `"verified": true` dengan URL/sha256 asli (bukan placeholder `"TODO"`).
+//! Manifest yang di-embed saat ini belum diverifikasi (lihat CLAUDE.md:
+//! "Jangan mengarang URL unduhan atau sha256"), jadi tes ini akan gagal
+//! dengan pesan yang jelas sampai manifest dilengkapi manusia.
+
+use dbnest_core::manager::{CreateInstanceRequest, Manager};
+use dbnest_core::model::{EngineKind, InstanceStatus};
+use dbnest_core::paths::Paths;
+
+fn require_it_flag() {
+    if std::env::var("DBNEST_IT").ok().as_deref() != Some("1") {
+        panic!(
+            "jalankan dengan DBNEST_IT=1 (atau `cargo test -- --ignored`) untuk tes integrasi ini"
+        );
+    }
+}
+
+async fn full_lifecycle(engine: EngineKind, version: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::under_root(tmp.path());
+    let manager = Manager::with_paths(paths).unwrap();
+
+    let manifest = manager.manifest().unwrap();
+    let verified = manifest
+        .version_entry(engine, version)
+        .map(|v| v.verified)
+        .unwrap_or(false);
+    if !verified {
+        panic!(
+            "versi {engine} {version} belum diverifikasi di manifest/manifest.json \
+             (URL/sha256 masih placeholder \"TODO\"); lengkapi manifest sebelum \
+             menjalankan tes integrasi ini"
+        );
+    }
+
+    let instance = manager
+        .create_instance(CreateInstanceRequest {
+            engine,
+            version: version.to_string(),
+            name: None,
+            port: None,
+            autostart: false,
+        })
+        .unwrap();
+
+    manager.start(&instance.id, |_event| {}).await.unwrap();
+
+    let status = manager.status(&instance.id).await.unwrap();
+    assert!(
+        matches!(status, InstanceStatus::Running { .. }),
+        "instance harus Running setelah start, dapat: {status:?}"
+    );
+
+    manager.stop(&instance.id).await.unwrap();
+    let status = manager.status(&instance.id).await.unwrap();
+    assert_eq!(status, InstanceStatus::Stopped);
+
+    manager.delete_instance(&instance.id, true).await.unwrap();
+    assert!(manager.find_instance(&instance.id).is_err());
+}
+
+#[tokio::test]
+#[ignore]
+async fn redis_full_lifecycle() {
+    require_it_flag();
+    full_lifecycle(EngineKind::Redis, "7.4.0").await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_full_lifecycle() {
+    require_it_flag();
+    full_lifecycle(EngineKind::Postgres, "16.4").await;
+}
+
+/// Dua instance PostgreSQL versi sama di port berbeda harus bisa berjalan
+/// bersamaan (kriteria selesai Milestone 1).
+#[tokio::test]
+#[ignore]
+async fn two_postgres_instances_run_concurrently() {
+    require_it_flag();
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::under_root(tmp.path());
+    let manager = Manager::with_paths(paths).unwrap();
+
+    let manifest = manager.manifest().unwrap();
+    let verified = manifest
+        .version_entry(EngineKind::Postgres, "16.4")
+        .map(|v| v.verified)
+        .unwrap_or(false);
+    if !verified {
+        panic!("versi Postgres 16.4 belum diverifikasi di manifest/manifest.json");
+    }
+
+    let a = manager
+        .create_instance(CreateInstanceRequest {
+            engine: EngineKind::Postgres,
+            version: "16.4".to_string(),
+            name: Some("pg-a".to_string()),
+            port: Some(15432),
+            autostart: false,
+        })
+        .unwrap();
+    let b = manager
+        .create_instance(CreateInstanceRequest {
+            engine: EngineKind::Postgres,
+            version: "16.4".to_string(),
+            name: Some("pg-b".to_string()),
+            port: Some(15433),
+            autostart: false,
+        })
+        .unwrap();
+
+    manager.start(&a.id, |_| {}).await.unwrap();
+    manager.start(&b.id, |_| {}).await.unwrap();
+
+    assert!(matches!(
+        manager.status(&a.id).await.unwrap(),
+        InstanceStatus::Running { .. }
+    ));
+    assert!(matches!(
+        manager.status(&b.id).await.unwrap(),
+        InstanceStatus::Running { .. }
+    ));
+
+    manager.stop(&a.id).await.unwrap();
+    manager.stop(&b.id).await.unwrap();
+    manager.delete_instance(&a.id, true).await.unwrap();
+    manager.delete_instance(&b.id, true).await.unwrap();
+}
