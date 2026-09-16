@@ -42,6 +42,11 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Kunci cache bawaan hanya memuat nama job ("rust") dan "Linux-x64",
+          # jadi kedua leg matrix memakai entri yang sama dan saling menimpa
+          # target dir. `key` memisahkan cache per versi Ubuntu.
+          key: ${{ matrix.os }}
 
       - name: Format
         run: cargo fmt --all -- --check
