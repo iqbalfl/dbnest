@@ -80,17 +80,19 @@ pub async fn list_instances(manager: State<'_, Arc<CoreManager>>) -> CmdResult<V
 }
 
 #[tauri::command]
-pub fn create_instance(
+pub async fn create_instance(
     manager: State<'_, Arc<CoreManager>>,
     payload: CreateInstanceArgs,
 ) -> CmdResult<Instance> {
-    let instance = manager.create_instance(CreateInstanceRequest {
-        engine: payload.engine,
-        version: payload.version,
-        name: payload.name,
-        port: payload.port,
-        autostart: payload.autostart,
-    })?;
+    let instance = manager
+        .create_instance(CreateInstanceRequest {
+            engine: payload.engine,
+            version: payload.version,
+            name: payload.name,
+            port: payload.port,
+            autostart: payload.autostart,
+        })
+        .await?;
     Ok(instance)
 }
 
@@ -225,10 +227,39 @@ pub fn get_settings(manager: State<'_, Arc<CoreManager>>) -> CmdResult<SettingsF
     Ok(manager.get_settings()?)
 }
 
+/// `"systemd"` atau `"direct"` — backend proses yang benar-benar dipakai
+/// saat ini, beda dari `settings.process_backend` yang cuma preferensi
+/// (`auto` bisa jatuh ke salah satunya tergantung sistem).
+#[tauri::command]
+pub fn active_backend(manager: State<'_, Arc<CoreManager>>) -> &'static str {
+    manager.backend_label()
+}
+
 #[tauri::command]
 pub fn update_settings(
     manager: State<'_, Arc<CoreManager>>,
     settings: SettingsFile,
 ) -> CmdResult<SettingsFile> {
     Ok(manager.update_settings(settings)?)
+}
+
+/// Dipanggil frontend setelah pengguna menjawab dialog konfirmasi "Hentikan
+/// semua server?" yang dipicu event `app://confirm-quit` (hanya muncul
+/// untuk `DirectBackend`, §13.3). `stop_servers=false` juga valid dipakai
+/// untuk backend systemd (tidak ada yang dihentikan, cuma keluar).
+#[tauri::command]
+pub async fn quit_app(
+    manager: State<'_, Arc<CoreManager>>,
+    app: AppHandle,
+    stop_servers: bool,
+) -> CmdResult<()> {
+    if stop_servers {
+        if let Ok(instances) = manager.list_instances() {
+            for instance in instances {
+                let _ = manager.stop(&instance.id).await;
+            }
+        }
+    }
+    app.exit(0);
+    Ok(())
 }

@@ -49,6 +49,7 @@ async fn full_lifecycle(engine: EngineKind, version: &str) {
             port: None,
             autostart: false,
         })
+        .await
         .unwrap();
 
     manager.start(&instance.id, |_event| {}).await.unwrap();
@@ -122,6 +123,7 @@ async fn two_mysql_instances_run_concurrently() {
             port: Some(13306),
             autostart: false,
         })
+        .await
         .unwrap();
     let b = manager
         .create_instance(CreateInstanceRequest {
@@ -131,6 +133,7 @@ async fn two_mysql_instances_run_concurrently() {
             port: Some(13307),
             autostart: false,
         })
+        .await
         .unwrap();
 
     manager.start(&a.id, |_| {}).await.unwrap();
@@ -178,6 +181,7 @@ async fn two_postgres_instances_run_concurrently() {
             port: Some(15432),
             autostart: false,
         })
+        .await
         .unwrap();
     let b = manager
         .create_instance(CreateInstanceRequest {
@@ -187,6 +191,7 @@ async fn two_postgres_instances_run_concurrently() {
             port: Some(15433),
             autostart: false,
         })
+        .await
         .unwrap();
 
     manager.start(&a.id, |_| {}).await.unwrap();

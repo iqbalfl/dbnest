@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import { onInstanceProgress, onInstanceStatus, onInstancesChanged } from "./events";
+import { onConfirmQuit, onInstanceProgress, onInstanceStatus, onInstancesChanged } from "./events";
 import type { InstanceView, Manifest, ProgressEvent } from "./types";
 import InstanceList from "./components/InstanceList";
 import NewServerDialog from "./components/NewServerDialog";
@@ -49,6 +49,14 @@ export default function App() {
       }),
       onInstanceProgress(({ id, event }) => {
         setProgress((prev) => ({ ...prev, [id]: event }));
+      }),
+      onConfirmQuit(() => {
+        // DirectBackend saja (§13.3): server yang sedang berjalan tidak
+        // diawasi siapa pun kalau aplikasi ditutup, jadi tanya dulu.
+        const stopServers = window.confirm(
+          "Hentikan semua server yang sedang berjalan sebelum keluar?",
+        );
+        void api.quitApp(stopServers);
       }),
     ];
     return () => {

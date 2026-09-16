@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use crate::config::{ConfigStore, SettingsFile};
+use crate::config::{ConfigStore, ProcessBackendKind, SettingsFile};
 use crate::engines::{self, InstanceCtx};
 use crate::error::{Error, Result};
 use crate::install::{self, Installer};
@@ -15,7 +15,8 @@ use crate::paths::Paths;
 use crate::ports;
 use crate::preflight;
 use crate::process::direct::DirectBackend;
-use crate::process::{ProcState, ProcessBackend};
+use crate::process::systemd::SystemdUserBackend;
+use crate::process::{self, ProcState, ProcessBackend};
 use crate::terminal;
 
 pub struct CreateInstanceRequest {
@@ -39,6 +40,7 @@ pub struct Manager {
     paths: Paths,
     config: ConfigStore,
     backend: Box<dyn ProcessBackend>,
+    backend_is_systemd: bool,
 }
 
 impl Manager {
@@ -52,12 +54,29 @@ impl Manager {
     pub fn with_paths(paths: Paths) -> Result<Self> {
         paths.ensure_base_dirs()?;
         let config = ConfigStore::new(paths.clone());
-        let backend: Box<dyn ProcessBackend> = Box::new(DirectBackend::new(paths.clone()));
+        let (backend, backend_is_systemd) = select_backend(&config, &paths)?;
         Ok(Self {
             paths,
             config,
             backend,
+            backend_is_systemd,
         })
+    }
+
+    /// `"systemd"` atau `"direct"` — backend proses yang sedang dipakai
+    /// (§9). Dipakai `dbnest doctor` dan GUI (mis. untuk memutuskan apakah
+    /// perlu menawarkan "hentikan semua server?" saat Quit, karena hanya
+    /// `DirectBackend` yang tidak diawasi systemd secara independen).
+    pub fn backend_label(&self) -> &'static str {
+        if self.backend_is_systemd {
+            "systemd"
+        } else {
+            "direct"
+        }
+    }
+
+    pub fn is_direct_backend(&self) -> bool {
+        !self.backend_is_systemd
     }
 
     pub fn manifest(&self) -> Result<Manifest> {
@@ -76,7 +95,7 @@ impl Manager {
             .ok_or_else(|| Error::InstanceNotFound(id_or_name.to_string()))
     }
 
-    pub fn create_instance(&self, req: CreateInstanceRequest) -> Result<Instance> {
+    pub async fn create_instance(&self, req: CreateInstanceRequest) -> Result<Instance> {
         let manifest = self.manifest()?;
         if manifest.version_entry(req.engine, &req.version).is_none() {
             return Err(Error::VersionUnavailable {
@@ -86,7 +105,7 @@ impl Manager {
         }
         let adapter = engines::adapter(req.engine)?;
 
-        self.config.with_instances(|file| {
+        let instance = self.config.with_instances(|file| {
             let port = match req.port {
                 Some(p) => {
                     if p < 1024 {
@@ -128,7 +147,17 @@ impl Manager {
             };
             file.instances.push(instance.clone());
             Ok(instance)
-        })
+        })?;
+
+        // Kalau autostart dicentang, unit systemd (kalau backend-nya
+        // systemd) harus langsung dibuat & di-enable sekarang juga, bukan
+        // menunggu instance ini pernah di-start manual sekali — supaya
+        // "logout lalu login lagi" langsung menjalankannya (§20 M4).
+        if instance.autostart {
+            self.sync_autostart(&instance).await?;
+        }
+
+        Ok(instance)
     }
 
     /// Alur start lengkap dari §9.3: preflight (disederhanakan di Milestone
@@ -372,11 +401,44 @@ impl Manager {
             Ok(target.clone())
         })?;
 
+        // Selaraskan unit systemd (kalau ada) dengan config terbaru —
+        // nama/port yang berubah harus ikut tertulis ulang di ExecStart,
+        // dan status enabled harus ikut autostart yang baru (§12: "tulis
+        // ulang unit systemd").
+        self.sync_autostart(&updated).await?;
+
         if was_running && patch.port.is_some() {
             self.start(&instance.id, |_| {}).await?;
         }
 
         Ok(updated)
+    }
+
+    /// Jalankan semua instance dengan `autostart = true`. Dipakai saat
+    /// aplikasi/tray dibuka, supaya `DirectBackend` (yang tidak punya
+    /// mekanisme autostart level-OS) tetap menepati flag ini (§9.2).
+    /// Untuk `SystemdUserBackend`, autostart sesungguhnya sudah ditangani
+    /// systemd sendiri lewat unit yang di-enable; memanggil ini lagi cukup
+    /// aman karena `start()` idempoten.
+    pub async fn autostart_all(&self) -> Result<()> {
+        for instance in self.list_instances()? {
+            if instance.autostart {
+                let _ = self.start(&instance.id, |_| {}).await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Tulis ulang (atau buat) unit systemd instance ini dan set status
+    /// enabled-nya sesuai `instance.autostart`. Untuk backend selain
+    /// systemd ini adalah no-op (lihat `DirectBackend::set_autostart`).
+    async fn sync_autostart(&self, instance: &Instance) -> Result<()> {
+        let adapter = engines::adapter(instance.engine)?;
+        let ctx = self.ctx_for(instance);
+        let spec = adapter.launch_spec(&ctx)?;
+        self.backend
+            .set_autostart(&instance.id, &spec, &ctx.log_file, instance.autostart)
+            .await
     }
 
     /// Semua versi engine yang sudah terpasang di disk, dengan ukurannya.
@@ -495,6 +557,23 @@ impl Manager {
             conf_dir: self.paths.instance_conf_dir(&instance.id),
             lib_path,
         }
+    }
+}
+
+/// Pilih `ProcessBackend` sesuai `settings.process_backend` (§9): `auto`
+/// memakai systemd kalau `systemctl --user` benar-benar tersedia, selain
+/// itu `direct`.
+fn select_backend(config: &ConfigStore, paths: &Paths) -> Result<(Box<dyn ProcessBackend>, bool)> {
+    let kind = config.load_settings()?.process_backend;
+    let use_systemd = match kind {
+        ProcessBackendKind::Direct => false,
+        ProcessBackendKind::Systemd => true,
+        ProcessBackendKind::Auto => process::systemd_user_available(),
+    };
+    if use_systemd {
+        Ok((Box::new(SystemdUserBackend::new(paths.clone())), true))
+    } else {
+        Ok((Box::new(DirectBackend::new(paths.clone())), false))
     }
 }
 

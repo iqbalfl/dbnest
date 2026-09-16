@@ -123,7 +123,7 @@ async fn run(cli: Cli) -> dbnest_core::Result<()> {
             name,
             port,
             autostart,
-        } => cmd_create(&manager, cli.json, &engine, &version, name, port, autostart),
+        } => cmd_create(&manager, cli.json, &engine, &version, name, port, autostart).await,
         Commands::Start { id } => cmd_start(&manager, cli.json, &id).await,
         Commands::Stop { id } => cmd_stop(&manager, cli.json, &id).await,
         Commands::Restart { id } => cmd_restart(&manager, cli.json, &id).await,
@@ -218,7 +218,7 @@ fn status_label(status: &InstanceStatus) -> String {
     }
 }
 
-fn cmd_create(
+async fn cmd_create(
     manager: &Manager,
     json: bool,
     engine: &str,
@@ -228,13 +228,15 @@ fn cmd_create(
     autostart: bool,
 ) -> dbnest_core::Result<()> {
     let engine = parse_engine(engine)?;
-    let instance = manager.create_instance(CreateInstanceRequest {
-        engine,
-        version: version.to_string(),
-        name,
-        port,
-        autostart,
-    })?;
+    let instance = manager
+        .create_instance(CreateInstanceRequest {
+            engine,
+            version: version.to_string(),
+            name,
+            port,
+            autostart,
+        })
+        .await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&instance)?);
@@ -396,6 +398,7 @@ async fn cmd_doctor(manager: &Manager, json: bool) -> dbnest_core::Result<()> {
         #[derive(Serialize)]
         struct DoctorReport {
             system: dbnest_core::preflight::SystemInfo,
+            process_backend: &'static str,
             instances: Vec<InstanceIssues>,
         }
         #[derive(Serialize)]
@@ -405,6 +408,7 @@ async fn cmd_doctor(manager: &Manager, json: bool) -> dbnest_core::Result<()> {
         }
         let payload = DoctorReport {
             system,
+            process_backend: manager.backend_label(),
             instances: report
                 .into_iter()
                 .map(|(instance, issues)| InstanceIssues { instance, issues })
@@ -416,6 +420,7 @@ async fn cmd_doctor(manager: &Manager, json: bool) -> dbnest_core::Result<()> {
 
     println!("sistem   : {} ({})", system.os_id, system.os_version);
     println!("arsitektur: {}", system.arch);
+    println!("backend  : {}", manager.backend_label());
     println!(
         "root?    : {}",
         if system.running_as_root {
