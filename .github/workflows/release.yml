@@ -1,0 +1,103 @@
+# Rilis sesuai DESIGN.md §19: bundle AppImage/.deb/.rpm lewat `tauri build`
+# untuk x86_64, plus tarball CLI `dbnest` terpisah, diunggah ke GitHub
+# Releases. Runner aarch64 menyusul.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    name: Bundle (x86_64)
+    runs-on: ubuntu-22.04 # glibc tertua yang didukung, supaya bundle jalan di distro lama juga
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            patchelf \
+            file \
+            xdg-utils
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install frontend dependencies
+        # `tauri build` menjalankan `npm run build` sendiri lewat
+        # beforeBuildCommand, jadi di sini cukup menyiapkan node_modules.
+        working-directory: ui
+        run: npm ci
+
+      - name: Build CLI
+        run: cargo build --release -p dbnest-cli
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Bundle desktop app
+        # `xdg-utils` wajib ada: linuxdeploy menyalin `xdg-open` ke dalam
+        # AppImage dan gagal kalau binarynya tidak ditemukan.
+        run: cargo tauri build --bundles appimage,deb,rpm
+        env:
+          # AppImage mengunduh tooling linuxdeploy saat build.
+          NO_STRIP: "true"
+
+      - name: Package CLI tarball
+        run: |
+          # Tag `v1.2.3` -> `1.2.3`; build manual tanpa tag -> "dev".
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="dev"
+          fi
+          STAGE="dbnest-cli-${VERSION}-x86_64-linux"
+          mkdir -p "$STAGE"
+          cp target/release/dbnest "$STAGE/"
+          cp README.md "$STAGE/"
+          tar -czf "${STAGE}.tar.gz" "$STAGE"
+          sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+
+      - name: Collect bundles
+        run: |
+          mkdir -p dist
+          find target/release/bundle -type f \
+            \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) \
+            -exec cp {} dist/ \;
+          cp dbnest-cli-*.tar.gz dbnest-cli-*.tar.gz.sha256 dist/
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbnest-x86_64
+          path: dist/
+
+      - name: Publish to GitHub Releases
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: true
+          generate_release_notes: true

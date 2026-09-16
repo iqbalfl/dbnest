@@ -6,7 +6,7 @@ use crate::config::{ConfigStore, ProcessBackendKind, SettingsFile};
 use crate::engines::{self, InstanceCtx};
 use crate::error::{Error, Result};
 use crate::install::{self, Installer};
-use crate::manifest::{self, Manifest};
+use crate::manifest::{self, Manifest, ManifestSource};
 use crate::model::{
     ConnectionInfo, EngineKind, InstalledVersion, Instance, InstanceStatus, Issue, IssueSeverity,
     ProgressEvent,
@@ -79,8 +79,30 @@ impl Manager {
         !self.backend_is_systemd
     }
 
+    /// Manifest yang dipakai sekarang: cache hasil unduhan terakhir, atau
+    /// salinan bawaan binary (§5.3). Tidak menyentuh jaringan.
     pub fn manifest(&self) -> Result<Manifest> {
-        Manifest::embedded()
+        Ok(manifest::load(&self.paths)?.0)
+    }
+
+    /// Dari mana manifest saat ini berasal — supaya pengguna bisa tahu
+    /// apakah daftar versi yang dilihat sudah datang dari `manifest_url`
+    /// atau masih bawaan aplikasi.
+    pub fn manifest_source(&self) -> Result<ManifestSource> {
+        Ok(manifest::load(&self.paths)?.1)
+    }
+
+    /// Unduh ulang manifest dari `settings.manifest_url` dan simpan ke
+    /// cache. Gagal kalau URL belum diatur atau unduhannya gagal — supaya
+    /// UI bisa bilang apa adanya saat pengguna menekan "Refresh versions".
+    pub async fn refresh_manifest(&self) -> Result<Manifest> {
+        let url = self.get_settings()?.manifest_url.ok_or_else(|| {
+            Error::Other(
+                "manifest_url belum diatur di settings; isi dulu supaya bisa mengambil daftar versi terbaru"
+                    .to_string(),
+            )
+        })?;
+        manifest::refresh(&self.paths, &url).await
     }
 
     pub fn list_instances(&self) -> Result<Vec<Instance>> {
@@ -523,6 +545,28 @@ impl Manager {
             .envs(launch.env.iter().cloned())
             .spawn()?;
 
+        Ok(terminal::connection_hint(instance.engine, instance.port))
+    }
+
+    /// Environment untuk bekerja dengan instance ini dari shell: PATH sudah
+    /// diawali direktori client engine-nya, plus variabel koneksi per
+    /// engine (§11.1). Dipakai `dbnest shell` dan `dbnest env`.
+    pub fn instance_env(&self, id_or_name: &str) -> Result<Vec<(String, String)>> {
+        let instance = self.find_instance(id_or_name)?;
+        let adapter = engines::adapter(instance.engine)?;
+        let ctx = self.ctx_for(&instance);
+        Ok(terminal::instance_env(adapter, &ctx))
+    }
+
+    /// Shell login pengguna, program yang dijalankan `dbnest shell`.
+    pub fn user_shell(&self) -> String {
+        terminal::user_shell()
+    }
+
+    /// Petunjuk tambahan yang perlu ditampilkan sebelum masuk shell, untuk
+    /// engine yang tidak punya variabel env koneksi (Redis).
+    pub fn connection_hint(&self, id_or_name: &str) -> Result<Option<String>> {
+        let instance = self.find_instance(id_or_name)?;
         Ok(terminal::connection_hint(instance.engine, instance.port))
     }
 

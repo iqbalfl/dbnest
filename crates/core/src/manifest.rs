@@ -1,15 +1,34 @@
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::atomic_write;
 use crate::error::{Error, Result};
 use crate::model::EngineKind;
+use crate::paths::Paths;
 
 /// Salinan `manifest/manifest.json` yang di-embed ke dalam binary, dipakai
-/// sebagai fallback offline (§5.3) dan, untuk Milestone 1, satu-satunya
-/// sumber manifest (belum ada fetch remote).
+/// sebagai fallback offline terakhir (§5.3).
 pub const EMBEDDED_MANIFEST_JSON: &str = include_str!("../../../manifest/manifest.json");
+
+/// Timeout pengambilan manifest remote (§5.3).
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Skema manifest tertinggi yang dimengerti versi aplikasi ini. Manifest
+/// remote dengan skema lebih baru ditolak supaya tidak salah tafsir.
+const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+
+/// Dari mana manifest yang sedang dipakai berasal.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ManifestSource {
+    /// Hasil unduhan terakhir dari `manifest_url`, tersimpan di cache XDG.
+    Cache,
+    /// Salinan bawaan binary, dipakai kalau belum pernah berhasil mengunduh.
+    Embedded,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Manifest {
@@ -90,6 +109,57 @@ impl Manifest {
     }
 }
 
+/// Manifest yang dipakai aplikasi sekarang: cache hasil unduhan terakhir
+/// kalau ada dan masih bisa dibaca, selain itu salinan bawaan (§5.3).
+/// Tidak pernah menyentuh jaringan — pemanggilnya ada di jalur panas.
+pub fn load(paths: &Paths) -> Result<(Manifest, ManifestSource)> {
+    let cache_path = paths.manifest_cache_file();
+    if let Ok(contents) = std::fs::read_to_string(&cache_path) {
+        match parse_validated(&contents) {
+            Ok(manifest) => return Ok((manifest, ManifestSource::Cache)),
+            Err(e) => {
+                // Cache rusak/terlalu baru bukan alasan untuk gagal total;
+                // cukup jatuh ke embedded dan biarkan refresh berikutnya
+                // menimpanya.
+                tracing::warn!("cache manifest diabaikan ({e}), memakai manifest bawaan");
+            }
+        }
+    }
+    Ok((Manifest::embedded()?, ManifestSource::Embedded))
+}
+
+/// Unduh manifest dari `url` (timeout 10 detik), validasi, lalu simpan ke
+/// cache XDG secara atomik. Error dikembalikan apa adanya supaya UI bisa
+/// memberi tahu pengguna kalau "Refresh versions" gagal — aplikasi sendiri
+/// tetap jalan dengan cache/embedded yang lama.
+pub async fn refresh(paths: &Paths, url: &str) -> Result<Manifest> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(url)
+        .timeout(FETCH_TIMEOUT)
+        .send()
+        .await?
+        .error_for_status()?;
+    let body = response.text().await?;
+
+    // Validasi dulu, baru tulis cache: respons yang tidak valid tidak boleh
+    // meracuni cache yang sebelumnya baik.
+    let manifest = parse_validated(&body)?;
+    atomic_write(&paths.manifest_cache_file(), body.as_bytes())?;
+    Ok(manifest)
+}
+
+fn parse_validated(json: &str) -> Result<Manifest> {
+    let manifest = Manifest::parse(json)?;
+    if manifest.schema_version > SUPPORTED_SCHEMA_VERSION {
+        return Err(Error::Other(format!(
+            "manifest schema_version {} lebih baru dari yang didukung aplikasi ini ({SUPPORTED_SCHEMA_VERSION}); perbarui DBnest",
+            manifest.schema_version
+        )));
+    }
+    Ok(manifest)
+}
+
 /// Pilih artefak untuk `engine`/`version` berdasarkan arsitektur saat ini
 /// (`std::env::consts::ARCH`), menolak entri yang belum diverifikasi.
 pub fn select_artifact<'m>(
@@ -144,6 +214,84 @@ pub fn parse_engine_kind(s: &str) -> Result<EngineKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_cache(paths: &Paths, contents: &str) {
+        let cache = paths.manifest_cache_file();
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(cache, contents).unwrap();
+    }
+
+    fn minimal_manifest_json(schema_version: u32, redis_version: &str) -> String {
+        format!(
+            r#"{{
+                "schema_version": {schema_version},
+                "generated_at": "2026-01-01T00:00:00Z",
+                "engines": {{
+                    "redis": {{
+                        "display_name": "Redis",
+                        "default_port": 6379,
+                        "versions": [{{
+                            "version": "{redis_version}",
+                            "channel": "stable",
+                            "verified": true,
+                            "artifacts": {{
+                                "x86_64": {{"url": "https://example.com/r.tar.gz", "sha256": "abc", "format": "tar.gz", "strip_components": 1}}
+                            }}
+                        }}]
+                    }}
+                }}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn load_falls_back_to_embedded_without_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under_root(tmp.path());
+        let (manifest, source) = load(&paths).unwrap();
+        assert_eq!(source, ManifestSource::Embedded);
+        assert!(manifest.engine_catalog(EngineKind::Redis).is_some());
+    }
+
+    #[test]
+    fn load_prefers_cache_over_embedded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under_root(tmp.path());
+        write_cache(&paths, &minimal_manifest_json(1, "9.9.9-from-cache"));
+
+        let (manifest, source) = load(&paths).unwrap();
+        assert_eq!(source, ManifestSource::Cache);
+        assert!(manifest
+            .version_entry(EngineKind::Redis, "9.9.9-from-cache")
+            .is_some());
+    }
+
+    #[test]
+    fn load_ignores_corrupt_cache_and_uses_embedded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under_root(tmp.path());
+        write_cache(&paths, "{ this is not valid json");
+
+        let (manifest, source) = load(&paths).unwrap();
+        assert_eq!(source, ManifestSource::Embedded);
+        assert!(manifest.engine_catalog(EngineKind::Redis).is_some());
+    }
+
+    #[test]
+    fn load_ignores_cache_with_newer_schema_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under_root(tmp.path());
+        write_cache(&paths, &minimal_manifest_json(999, "1.0.0"));
+
+        let (_, source) = load(&paths).unwrap();
+        assert_eq!(source, ManifestSource::Embedded);
+    }
+
+    #[test]
+    fn parse_validated_rejects_future_schema_version() {
+        let err = parse_validated(&minimal_manifest_json(2, "1.0.0")).unwrap_err();
+        assert!(err.to_string().contains("schema_version"));
+    }
 
     #[test]
     fn embedded_manifest_parses() {

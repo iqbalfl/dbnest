@@ -61,6 +61,20 @@ enum Commands {
         #[arg(long)]
         keep_data: bool,
     },
+    /// Buka $SHELL dengan PATH/env yang mengarah ke engine instance ini.
+    Shell { id: String },
+    /// Cetak baris `export ...` untuk di-eval di shell saat ini.
+    Env { id: String },
+    /// Daftar versi di manifest, atau hanya yang sudah terpasang.
+    Versions {
+        #[arg(long)]
+        installed: bool,
+        /// Unduh ulang manifest dari `manifest_url` sebelum menampilkan.
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Hapus versi engine yang sudah terpasang.
+    Uninstall { engine: String, version: String },
     /// Jalankan preflight untuk semua instance + info sistem.
     Doctor,
 }
@@ -131,6 +145,14 @@ async fn run(cli: Cli) -> dbnest_core::Result<()> {
         Commands::Logs { id, lines } => cmd_logs(&manager, cli.json, &id, lines),
         Commands::Info { id } => cmd_info(&manager, cli.json, &id),
         Commands::Delete { id, keep_data } => cmd_delete(&manager, cli.json, &id, keep_data).await,
+        Commands::Shell { id } => cmd_shell(&manager, &id),
+        Commands::Env { id } => cmd_env(&manager, cli.json, &id),
+        Commands::Versions { installed, refresh } => {
+            cmd_versions(&manager, cli.json, installed, refresh).await
+        }
+        Commands::Uninstall { engine, version } => {
+            cmd_uninstall(&manager, cli.json, &engine, &version)
+        }
         Commands::Doctor => cmd_doctor(&manager, cli.json).await,
     }
 }
@@ -457,4 +479,209 @@ async fn cmd_doctor(manager: &Manager, json: bool) -> dbnest_core::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Bungkus nilai untuk baris `export` yang aman di-eval shell: kutip
+/// tunggal, dengan kutip tunggal di dalamnya dipecah jadi `'\''`.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+fn cmd_env(manager: &Manager, json: bool, id: &str) -> dbnest_core::Result<()> {
+    let env = manager.instance_env(id)?;
+    if json {
+        let map: std::collections::BTreeMap<_, _> = env.into_iter().collect();
+        println!("{}", serde_json::to_string_pretty(&map)?);
+        return Ok(());
+    }
+    for (key, value) in env {
+        println!("export {key}={}", shell_quote(&value));
+    }
+    if let Some(hint) = manager.connection_hint(id)? {
+        println!("# petunjuk koneksi: {hint}");
+    }
+    Ok(())
+}
+
+fn cmd_shell(manager: &Manager, id: &str) -> dbnest_core::Result<()> {
+    use std::os::unix::process::CommandExt as _;
+
+    let env = manager.instance_env(id)?;
+    let shell = manager.user_shell();
+    if let Some(hint) = manager.connection_hint(id)? {
+        println!("dbnest: {hint}");
+    }
+
+    // `exec` menggantikan proses ini dengan shell-nya, jadi tidak ada
+    // lapisan proses dbnest yang menganggur selama sesi berlangsung.
+    // Baris berikutnya hanya tercapai kalau exec gagal.
+    let err = std::process::Command::new(&shell).envs(env).exec();
+    Err(dbnest_core::Error::Process(format!(
+        "gagal menjalankan shell {shell}: {err}"
+    )))
+}
+
+#[derive(Serialize)]
+struct VersionRow {
+    engine: String,
+    version: String,
+    installed: bool,
+    verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+}
+
+async fn cmd_versions(
+    manager: &Manager,
+    json: bool,
+    installed_only: bool,
+    refresh: bool,
+) -> dbnest_core::Result<()> {
+    if refresh {
+        manager.refresh_manifest().await?;
+    }
+    let installed = manager.installed_versions()?;
+    let is_installed = |engine: &str, version: &str| {
+        installed
+            .iter()
+            .any(|i| i.engine.as_str() == engine && i.version == version)
+    };
+    let size_of = |engine: &str, version: &str| {
+        installed
+            .iter()
+            .find(|i| i.engine.as_str() == engine && i.version == version)
+            .map(|i| i.size_bytes)
+    };
+
+    let manifest = manager.manifest()?;
+    let mut rows: Vec<VersionRow> = Vec::new();
+    let mut engines: Vec<_> = manifest.engines.iter().collect();
+    engines.sort_by_key(|(k, _)| (*k).clone());
+    for (engine, catalog) in engines {
+        for entry in &catalog.versions {
+            let installed_here = is_installed(engine, &entry.version);
+            if installed_only && !installed_here {
+                continue;
+            }
+            rows.push(VersionRow {
+                engine: engine.clone(),
+                version: entry.version.clone(),
+                installed: installed_here,
+                verified: entry.verified,
+                size_bytes: size_of(engine, &entry.version),
+            });
+        }
+    }
+
+    // Versi terpasang yang sudah tidak ada di manifest tetap perlu terlihat,
+    // supaya bisa di-uninstall.
+    for item in &installed {
+        let known = rows
+            .iter()
+            .any(|r| r.engine == item.engine.as_str() && r.version == item.version);
+        if !known {
+            rows.push(VersionRow {
+                engine: item.engine.as_str().to_string(),
+                version: item.version.clone(),
+                installed: true,
+                verified: false,
+                size_bytes: Some(item.size_bytes),
+            });
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("Tidak ada versi untuk ditampilkan.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<10} {:<10} {:<10} CATATAN",
+        "ENGINE", "VERSION", "INSTALLED"
+    );
+    for row in rows {
+        let note = match (row.installed, row.verified) {
+            (true, _) => row
+                .size_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "terpasang".to_string()),
+            (false, false) => "belum diverifikasi di manifest".to_string(),
+            (false, true) => String::new(),
+        };
+        println!(
+            "{:<10} {:<10} {:<10} {}",
+            row.engine,
+            row.version,
+            if row.installed { "ya" } else { "tidak" },
+            note
+        );
+    }
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+fn cmd_uninstall(
+    manager: &Manager,
+    json: bool,
+    engine: &str,
+    version: &str,
+) -> dbnest_core::Result<()> {
+    let engine = parse_engine(engine)?;
+    manager.uninstall_version(engine, version)?;
+    if !json {
+        println!("{engine} {version}: dihapus");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_quote_wraps_plain_value() {
+        assert_eq!(shell_quote("/usr/bin"), "'/usr/bin'");
+    }
+
+    #[test]
+    fn shell_quote_survives_spaces() {
+        assert_eq!(shell_quote("/home/a b/bin"), "'/home/a b/bin'");
+    }
+
+    /// Path dengan kutip tunggal harus tetap aman di-`eval`: potong kutip,
+    /// sisipkan kutip yang di-escape, lalu buka kutip lagi.
+    #[test]
+    fn shell_quote_escapes_single_quote() {
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn shell_quote_does_not_expand_variables() {
+        assert_eq!(shell_quote("$HOME/`whoami`"), "'$HOME/`whoami`'");
+    }
+
+    #[test]
+    fn format_bytes_scales_units() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(2048), "2.0 KB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
+    }
 }

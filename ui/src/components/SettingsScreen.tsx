@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
-import type { InstalledVersion, ProcessBackendKind, SettingsFile } from "../types";
+import type {
+  InstalledVersion,
+  ManifestSource,
+  ProcessBackendKind,
+  SettingsFile,
+} from "../types";
 import { api } from "../api";
 import { errorMessage, formatBytes } from "../format";
 
@@ -12,7 +17,9 @@ export default function SettingsScreen({ onClose, onError }: Props) {
   const [settings, setSettings] = useState<SettingsFile | null>(null);
   const [versions, setVersions] = useState<InstalledVersion[]>([]);
   const [activeBackend, setActiveBackend] = useState<string | null>(null);
+  const [manifestSource, setManifestSource] = useState<ManifestSource | null>(null);
   const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const load = () => {
     void api.getSettings().then(setSettings).catch((e) => onError(errorMessage(e)));
@@ -21,6 +28,21 @@ export default function SettingsScreen({ onClose, onError }: Props) {
       .then(setVersions)
       .catch((e) => onError(errorMessage(e)));
     void api.activeBackend().then(setActiveBackend).catch(() => undefined);
+    void api.manifestSource().then(setManifestSource).catch(() => undefined);
+  };
+
+  // Unduh ulang manifest dari manifest_url. Kegagalan sengaja ditampilkan
+  // ke pengguna: mereka baru saja menekan tombolnya (§5.3).
+  const refreshVersions = async () => {
+    setRefreshing(true);
+    try {
+      await api.refreshManifest();
+      load();
+    } catch (e) {
+      onError(errorMessage(e));
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   useEffect(load, []);
@@ -84,9 +106,20 @@ export default function SettingsScreen({ onClose, onError }: Props) {
             onBlur={() => void save({ manifest_url: settings.manifest_url })}
           />
         </label>
-        <button className="btn" onClick={load} disabled={saving}>
-          Refresh versions
+        <button
+          className="btn"
+          onClick={() => void refreshVersions()}
+          disabled={saving || refreshing}
+        >
+          {refreshing ? "Mengunduh…" : "Refresh versions"}
         </button>
+        {manifestSource && (
+          <p className="hint-text">
+            {manifestSource === "cache"
+              ? "Daftar versi berasal dari manifest yang sudah diunduh."
+              : "Daftar versi masih dari manifest bawaan aplikasi — isi Manifest URL lalu Refresh untuk mengambil yang terbaru."}
+          </p>
+        )}
       </section>
 
       <section className="settings-section">
