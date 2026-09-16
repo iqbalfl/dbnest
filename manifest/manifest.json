@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-16T00:00:00Z",
+  "engines": {
+    "redis": {
+      "display_name": "Redis",
+      "default_port": 6379,
+      "versions": [
+        {
+          "version": "7.4.0",
+          "channel": "stable",
+          "verified": false,
+          "artifacts": {
+            "x86_64": {
+              "url": "TODO",
+              "sha256": "TODO",
+              "format": "tar.gz",
+              "strip_components": 1
+            },
+            "aarch64": {
+              "url": "TODO",
+              "sha256": "TODO",
+              "format": "tar.gz",
+              "strip_components": 1
+            }
+          }
+        }
+      ]
+    },
+    "postgres": {
+      "display_name": "PostgreSQL",
+      "default_port": 5432,
+      "versions": [
+        {
+          "version": "16.4",
+          "channel": "stable",
+          "verified": false,
+          "artifacts": {
+            "x86_64": {
+              "url": "TODO",
+              "sha256": "TODO",
+              "format": "tar.gz",
+              "strip_components": 1
+            },
+            "aarch64": {
+              "url": "TODO",
+              "sha256": "TODO",
+              "format": "tar.gz",
+              "strip_components": 1
+            }
+          }
+        }
+      ]
+    }
+  }
+}
