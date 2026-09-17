@@ -24,6 +24,14 @@ impl SystemdUserBackend {
     /// Tulis (atau timpa) unit file lalu `daemon-reload`, supaya perubahan
     /// pada `LaunchSpec` (mis. port berubah) langsung diikuti systemd.
     async fn write_unit(&self, id: &str, spec: &LaunchSpec, log_file: &Path) -> Result<()> {
+        // `StandardOutput=append:` hanya membuat *file*-nya; direktori
+        // induknya harus sudah ada. Kalau tidak, systemd gagal menyiapkan
+        // stdio, prosesnya tidak pernah jalan, log tetap kosong, dan
+        // `Restart=on-failure` membuat unit itu bolak-balik hidup-mati.
+        // DirectBackend sudah melakukan ini di `spawn_detached`; systemd
+        // tidak punya padanannya, jadi harus dikerjakan di sini.
+        prepare_runtime_dirs(spec, log_file).await?;
+
         let unit_path = self.paths.systemd_unit_file(id);
         if let Some(dir) = unit_path.parent() {
             tokio::fs::create_dir_all(dir).await?;
@@ -56,7 +64,7 @@ impl ProcessBackend for SystemdUserBackend {
             "show",
             &unit,
             "-p",
-            "ActiveState,SubState,MainPID,Result",
+            "ActiveState,SubState,MainPID,Result,ExecMainStatus",
         ])
         .await?;
         if !output.status.success() {
@@ -79,10 +87,7 @@ impl ProcessBackend for SystemdUserBackend {
         match active_state {
             "active" => Ok(ProcState::Running { pid: main_pid }),
             "failed" => Ok(ProcState::Failed {
-                message: props
-                    .get("Result")
-                    .cloned()
-                    .unwrap_or_else(|| "gagal (tidak ada detail dari systemd)".to_string()),
+                message: failure_message(&props),
             }),
             _ => Ok(ProcState::Stopped),
         }
@@ -114,6 +119,36 @@ impl ProcessBackend for SystemdUserBackend {
         }
         self.daemon_reload().await
     }
+}
+
+/// Rangkai pesan gagal dari properti `systemctl show`. `Result` saja
+/// ("exit-code") tidak memberi tahu apa-apa, jadi status keluar prosesnya
+/// ikut disebut kalau ada.
+fn failure_message(props: &HashMap<String, String>) -> String {
+    let result = props
+        .get("Result")
+        .map(String::as_str)
+        .filter(|s| !s.is_empty() && *s != "success")
+        .unwrap_or("gagal");
+    match props
+        .get("ExecMainStatus")
+        .and_then(|s| s.parse::<i32>().ok())
+        .filter(|code| *code != 0)
+    {
+        Some(code) => format!("{result} (status keluar {code})"),
+        None => result.to_string(),
+    }
+}
+
+/// Siapkan direktori yang systemd sendiri tidak mau buatkan: folder induk
+/// file log dan `WorkingDirectory=`. Keduanya bikin unit gagal start kalau
+/// belum ada.
+async fn prepare_runtime_dirs(spec: &LaunchSpec, log_file: &Path) -> Result<()> {
+    if let Some(dir) = log_file.parent() {
+        tokio::fs::create_dir_all(dir).await?;
+    }
+    tokio::fs::create_dir_all(&spec.working_dir).await?;
+    Ok(())
 }
 
 async fn run_systemctl(args: &[&str]) -> Result<std::process::Output> {
@@ -173,6 +208,8 @@ fn render_unit(id: &str, spec: &LaunchSpec, log_file: &Path) -> String {
     format!(
         "[Unit]\n\
          Description=DBnest instance {id}\n\
+         StartLimitIntervalSec=60\n\
+         StartLimitBurst=3\n\
          \n\
          [Service]\n\
          Type=simple\n\
@@ -303,6 +340,80 @@ mod tests {
         };
         let unit = render_unit("my-abc123", &spec, Path::new("/tmp/log/engine.log"));
         assert!(unit.contains("Environment=\"LD_LIBRARY_PATH=/opt/dbnest/lib\"\n"));
+    }
+
+    fn sample_spec(working_dir: PathBuf) -> LaunchSpec {
+        LaunchSpec {
+            program: PathBuf::from("/opt/dbnest/bin/postgres"),
+            args: vec!["-D".to_string(), "/tmp/data".to_string()],
+            env: vec![],
+            working_dir,
+            stop_signal: StopSignal::Int,
+            stop_timeout: Duration::from_secs(30),
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_runtime_dirs_creates_log_dir_and_working_dir() {
+        // systemd hanya membuat *file* log, bukan direktorinya. Kalau
+        // direktori itu tidak ada, unit gagal start tanpa menulis apa pun ke
+        // log — persis gejala "status hidup-mati terus, log kosong".
+        let tmp = tempfile::tempdir().unwrap();
+        let log_file = tmp.path().join("instances/pg-abc123/logs/engine.log");
+        let working_dir = tmp.path().join("instances/pg-abc123/data");
+        assert!(!log_file.parent().unwrap().exists());
+
+        prepare_runtime_dirs(&sample_spec(working_dir.clone()), &log_file)
+            .await
+            .unwrap();
+
+        assert!(log_file.parent().unwrap().is_dir());
+        assert!(working_dir.is_dir());
+    }
+
+    #[tokio::test]
+    async fn prepare_runtime_dirs_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_file = tmp.path().join("logs/engine.log");
+        let spec = sample_spec(tmp.path().join("data"));
+        prepare_runtime_dirs(&spec, &log_file).await.unwrap();
+        prepare_runtime_dirs(&spec, &log_file).await.unwrap();
+        assert!(log_file.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn render_unit_limits_auto_restart() {
+        // Tanpa batas ini, `Restart=on-failure` mengulang selamanya tiap 3
+        // detik, sehingga UI melihat status berkedip alih-alih satu
+        // kegagalan yang jelas.
+        let unit = render_unit(
+            "pg-abc123",
+            &sample_spec(PathBuf::from("/tmp/data")),
+            Path::new("/tmp/log/engine.log"),
+        );
+        assert!(unit.contains("StartLimitIntervalSec=60"));
+        assert!(unit.contains("StartLimitBurst=3"));
+        // Batas start ada di [Unit], bukan [Service].
+        let unit_section = unit.split("[Service]").next().unwrap();
+        assert!(unit_section.contains("StartLimitBurst=3"));
+    }
+
+    #[test]
+    fn failure_message_mentions_exit_status() {
+        let props = parse_show_output("Result=exit-code\nExecMainStatus=1\n");
+        assert_eq!(failure_message(&props), "exit-code (status keluar 1)");
+    }
+
+    #[test]
+    fn failure_message_without_exit_status_falls_back_to_result() {
+        let props = parse_show_output("Result=timeout\nExecMainStatus=0\n");
+        assert_eq!(failure_message(&props), "timeout");
+    }
+
+    #[test]
+    fn failure_message_without_any_detail_is_still_readable() {
+        let props = parse_show_output("ActiveState=failed\n");
+        assert_eq!(failure_message(&props), "gagal");
     }
 
     #[test]

@@ -305,11 +305,20 @@ impl Manager {
     pub fn tail_logs(&self, id_or_name: &str, lines: usize) -> Result<Vec<String>> {
         let instance = self.find_instance(id_or_name)?;
         let log_file = self.paths.instance_log_file(&instance.id);
-        if !log_file.exists() {
-            return Ok(Vec::new());
-        }
-        let content = std::fs::read_to_string(&log_file)?;
+        let content = if log_file.exists() {
+            std::fs::read_to_string(&log_file)?
+        } else {
+            String::new()
+        };
         let all: Vec<String> = content.lines().map(str::to_string).collect();
+        if all.is_empty() && self.backend_is_systemd {
+            // Log kosong di bawah systemd biasanya berarti servernya gagal
+            // sebelum sempat menulis apa pun — misal `ExecStart` tidak bisa
+            // dijalankan, atau systemd gagal menyiapkan stdio. Alasannya ada
+            // di journal, bukan di file ini. Ini juga jalur yang diminta
+            // DESIGN §9.1 untuk systemd < 240 yang belum punya `append:`.
+            return Ok(journal_tail(&instance.id, lines));
+        }
         let start = all.len().saturating_sub(lines);
         Ok(all[start..].to_vec())
     }
@@ -602,6 +611,34 @@ impl Manager {
             lib_path,
         }
     }
+}
+
+/// Baca `n` baris terakhir journal milik unit instance. Dipakai hanya
+/// sebagai cadangan saat file log kosong; kalau `journalctl` tidak ada atau
+/// gagal, hasilnya kosong dan pemanggilnya tetap jalan seperti biasa.
+fn journal_tail(id: &str, lines: usize) -> Vec<String> {
+    let Ok(output) = std::process::Command::new("journalctl")
+        .args([
+            "--user",
+            "-u",
+            &format!("dbnest-{id}.service"),
+            "-n",
+            &lines.to_string(),
+            "--no-pager",
+            "--output=cat",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .filter(|l| !l.trim().is_empty())
+        .collect()
 }
 
 /// Pilih `ProcessBackend` sesuai `settings.process_backend` (§9): `auto`
