@@ -7,6 +7,7 @@ use crate::error::{Error, Result};
 use crate::manifest::Artifact;
 use crate::model::{EngineKind, InstallEvent};
 use crate::paths::Paths;
+use std::time::Duration;
 
 pub struct Installer<'a> {
     paths: &'a Paths,
@@ -15,10 +16,17 @@ pub struct Installer<'a> {
 
 impl<'a> Installer<'a> {
     pub fn new(paths: &'a Paths) -> Self {
-        Self {
-            paths,
-            client: reqwest::Client::new(),
-        }
+        // Tarball engine berukuran ratusan MB (MySQL 8.4.3 ~866 MB), jadi
+        // batas waktunya tidak boleh mengukur keseluruhan permintaan:
+        // `connect_timeout` menjaga koneksi yang menggantung, `read_timeout`
+        // menjaga unduhan yang berhenti mengalir, dan keduanya tetap
+        // membiarkan transfer besar berjalan selama masih ada data.
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(60))
+            .build()
+            .unwrap_or_default();
+        Self { paths, client }
     }
 
     pub fn is_installed(&self, engine: EngineKind, version: &str) -> bool {

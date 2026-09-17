@@ -6,10 +6,11 @@ Start. Berjalan native tanpa Docker, tanpa VM, dan tanpa root.
 DBnest adalah padanan [DBngin](https://dbngin.com/) untuk Linux. Nama dan aset
 DBngin/TablePlus tidak dipakai di proyek ini.
 
-> **Status: belum siap dipakai sehari-hari.** Aplikasi, CLI, dan GUI-nya sudah
-> jalan, tapi manifest bawaan belum berisi URL unduhan engine yang terverifikasi,
-> jadi instalasi engine otomatis belum bisa berjalan di luar kotak. Lihat
-> [Manifest engine](#manifest-engine) di bawah.
+> **Status: masih pra-rilis.** Manifest bawaan kini berisi artefak sungguhan
+> untuk keempat engine di x86_64, jadi `dbnest start` sudah bisa memasang dan
+> menjalankan server. Yang belum: belum ada rilis biner, aarch64 belum ada, dan
+> pengujian lintas distro baru mencakup Debian sekeluarga. Lihat
+> [Yang belum selesai](#yang-belum-selesai).
 
 ## Apa yang sudah ada
 
@@ -74,21 +75,26 @@ dari sebuah manifest JSON (DESIGN.md §5), dengan urutan: `manifest_url` di
 settings → cache hasil unduhan terakhir (`$XDG_CACHE_HOME/dbnest/manifest.json`)
 → salinan bawaan di dalam binary.
 
-**Manifest bawaan saat ini belum berisi artefak yang terverifikasi.** Semua
-entri ditandai `"verified": false` dengan `url` dan `sha256` berisi `"TODO"`,
-karena URL dan checksum tidak boleh dikarang. Akibatnya `dbnest start` akan
-menolak memasang engine dengan pesan "belum diverifikasi".
+Manifest bawaan sudah berisi artefak sungguhan untuk keempat engine di
+x86_64 — semuanya diisi oleh [`build-engines.yml`](#membangun-binary-engine),
+bukan diketik manual:
 
-Supaya instalasi otomatis berjalan, seseorang perlu:
+| Engine | Versi | Sumber artefak | sha256 |
+|---|---|---|---|
+| Redis | 7.4.0 | Releases repo ini (dibangun sendiri) | diukur saat build |
+| PostgreSQL | 16.4 | Releases repo ini (dibangun sendiri) | diukur saat build |
+| MariaDB | 11.4.4 | archive.mariadb.org | cocok dengan `sha256sums.txt` resmi |
+| MySQL | 8.4.3 | cdn.mysql.com (arsip) | diukur dari unduhan HTTPS — lihat catatan |
 
-1. Menyiapkan tarball engine (lihat §5.2 DESIGN.md untuk sumber tiap engine).
-   MySQL dan MariaDB punya tarball resmi yang tinggal dipakai. PostgreSQL dan
-   Redis tidak, jadi keduanya dibangun lewat workflow
-   [`build-engines.yml`](#membangun-binary-engine) di bawah.
-2. Menghitung sha256-nya, mengisi `manifest/manifest.json`, dan mengubah
-   `"verified"` jadi `true`. `build-engines.yml` melakukan ini lewat PR.
-3. Meng-host manifest itu (GitHub Pages/Releases) lalu mengisi **Manifest URL**
-   di Settings — atau cukup memperbarui manifest bawaan lalu build ulang.
+**Catatan MySQL:** untuk tarball ini upstream tidak menerbitkan berkas checksum
+yang bisa diambil otomatis, jadi sha256 di manifest diukur dari unduhan HTTPS
+di runner dan belum dicocokkan dengan nilai resmi. MariaDB dan PostgreSQL
+dicocokkan dengan checksum resmi upstream. Selisih ini disengaja dan dicatat,
+bukan disamarkan.
+
+Untuk menambah versi atau arsitektur, jalankan `build-engines.yml` lagi; untuk
+memperbarui tanpa rilis ulang aplikasi, host manifestnya (GitHub
+Pages/Releases) lalu isi **Manifest URL** di Settings.
 
 Setelah manifest di-host, versi baru cukup ditambahkan di sana: aplikasi
 mengambilnya saat dibuka atau lewat tombol **Refresh versions**, tanpa perlu
@@ -101,9 +107,19 @@ link.
 ## Membangun binary engine
 
 `.github/workflows/build-engines.yml` (jalankan manual lewat **Run workflow**)
-membangun Redis dan PostgreSQL di container AlmaLinux 8, mengunggah tarball-nya
-ke Releases repo ini, lalu membuka PR yang mengisi `manifest/manifest.json`
-dengan url dan sha256 hasil build. Alurnya mengikuti DESIGN.md §19.
+mengisi manifest dengan data sungguhan untuk keempat engine. Alurnya mengikuti
+DESIGN.md §19.
+
+| Engine | Cara | Hasil di manifest |
+|---|---|---|
+| Redis, PostgreSQL | dibangun dari source di container AlmaLinux 8 | url Releases repo ini |
+| MySQL, MariaDB | tarball resmi upstream diunduh dan diverifikasi | url resmi upstream |
+
+Keduanya bermuara di langkah yang sama: sha256 diukur di runner, lalu sebuah PR
+membuka pembaruan `manifest/manifest.json`. Tidak ada nilai yang diketik
+manual. Untuk MySQL dan MariaDB, tarball-nya juga dicek bentuknya
+(`scripts/check-tarball-layout.sh`) supaya `strip_components: 1` di manifest
+benar-benar menghasilkan `bin/` di akar.
 
 AlmaLinux 8 dipakai karena glibc-nya 2.28 — yang tertua di antara distro yang
 didukung. `scripts/check-portable.sh` menegakkan janji itu: build gagal kalau
@@ -118,10 +134,19 @@ direktori yang berbeda dari prefix build-nya, sekaligus membuktikan pohonnya
 relokatabel.
 
 Sumber PostgreSQL diverifikasi terhadap berkas `.sha256` resmi dari
-postgresql.org. Upstream Redis tidak menerbitkan berkas checksum yang bisa
-diambil otomatis, jadi sha256 tarball sumbernya hanya dicatat di log — cocokkan
-sekali dengan halaman unduhan Redis, lalu isikan ke input `redis_src_sha256`
-supaya build berikutnya menolak sumber yang berubah.
+postgresql.org, dan `scripts/verify-upstream-checksum.sh` melakukan hal yang
+sama untuk MySQL dan MariaDB bila upstream menerbitkannya. Kalau tidak ada
+checksum yang bisa diambil otomatis — seperti pada Redis — sha256-nya diukur
+dari unduhan HTTPS di runner dan diberi peringatan di log, bukan dikarang.
+Cocokkan sekali dengan halaman unduhan resmi, lalu isikan ke input
+`redis_src_sha256` supaya build berikutnya menolak sumber yang berubah.
+
+## Menguji di Debian dan turunannya
+
+Job `integration` di `ci.yml` (juga manual) memasang engine sungguhan dari
+manifest lalu menjalankannya di Ubuntu 24.04, Ubuntu 22.04, Debian 12, dan
+Debian 11. Ini yang membuktikan binary hasil `build-engines.yml` benar-benar
+jalan di distro target, bukan cuma terbangun.
 
 Prasyarat: **Settings → Actions → General → "Allow GitHub Actions to create and
 approve pull requests"** harus aktif supaya langkah PR manifest berhasil.
@@ -173,7 +198,8 @@ Tes integrasi mengunduh binary sungguhan dan menjalankan server, jadi ditandai
 DBNEST_IT=1 cargo test -p dbnest-core -- --ignored
 ```
 
-Tes ini baru bisa lulus setelah manifest berisi artefak terverifikasi.
+Sejak manifest berisi artefak sungguhan, tes ini bisa dijalankan — dan job
+`integration` di CI menjalankannya di Debian sekeluarga.
 
 ### Dependensi sistem untuk membangun GUI
 
@@ -201,12 +227,11 @@ Rancangan lengkap ada di [DESIGN.md](DESIGN.md).
 
 ## Yang belum selesai
 
-- Manifest belum berisi artefak terverifikasi (lihat di atas) — ini yang
-  menghalangi instalasi engine otomatis dan tes integrasi. `build-engines.yml`
-  sudah ada untuk mengisinya, tapi belum pernah dijalankan.
-- `build-engines.yml` baru membangun Redis dan PostgreSQL untuk x86_64. MySQL
-  dan MariaDB memakai tarball resmi, jadi url dan sha256-nya masih perlu diisi
-  dengan tangan.
+- Baru x86_64. aarch64 menunggu runner ARM, dan entri arsitektur itu dihapus
+  dari manifest (bukan dibiarkan `TODO`) supaya pengguna aarch64 mendapat
+  "versi tidak tersedia" yang jujur, bukan "belum diverifikasi".
+- sha256 MySQL 8.4.3 belum dicocokkan dengan checksum resmi upstream (lihat
+  [Manifest engine](#manifest-engine)); yang lain sudah.
 - MongoDB belum didukung.
 - Belum ada rilis biner. Ketiga bundle (AppImage, `.deb`, `.rpm`) sudah terbukti
   bisa dibangun dan `.deb`-nya terpasang bersih lewat `dpkg -i`, tapi
