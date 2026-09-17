@@ -6,11 +6,11 @@ hit Start. Runs natively: no Docker, no VM, no root.
 DBnest is a DBngin-style tool for Linux. It uses none of the DBngin/TablePlus
 names or assets.
 
-> **Status: pre-release.** The bundled manifest now carries real artifacts for
-> all four engines on x86_64, so `dbnest start` genuinely installs and runs a
-> server. Not there yet: no binary release, no aarch64, and cross-distro
-> testing so far covers the Debian family only. See
-> [What's not done](#whats-not-done).
+> **Status: v0.1.0.** The bundled manifest carries real artifacts for all four
+> engines on x86_64, so `dbnest start` genuinely installs and runs a server, and
+> [v0.1.0](https://github.com/iqbalfl/dbnest/releases/tag/v0.1.0) ships built
+> bundles. Not there yet: no aarch64, and cross-distro testing so far covers the
+> Debian family only. See [What's not done](#whats-not-done).
 
 ## What exists
 
@@ -26,23 +26,40 @@ names or assets.
 
 ## Installation
 
-No binary release yet. Until there is one, run from source (see
-[Development](#development)).
+Grab an artifact from
+[Releases](https://github.com/iqbalfl/dbnest/releases/tag/v0.1.0) —
+`release.yml` produces an AppImage, a `.deb`, an `.rpm`, and a separate CLI
+tarball, all x86_64:
 
-Once released, `release.yml` produces an AppImage, `.deb`, `.rpm`, and a
-separate CLI tarball for x86_64. Bundles are built on Ubuntu 22.04 so their
-glibc requirement stays low enough for older distros.
+```bash
+# GUI + CLI
+sudo dpkg -i DBnest_0.1.0_amd64.deb
+
+# CLI only
+tar xzf dbnest-cli-0.1.0-x86_64-linux.tar.gz
+install -Dm755 dbnest ~/.local/bin/dbnest
+```
+
+`SHA256SUMS` in the same release covers every asset; check it before installing.
+Or run from source (see [Development](#development)).
 
 ### Supported distros
 
-Needs glibc ≥ 2.28: Ubuntu 20.04+, Debian 11+, Fedora 36+, RHEL/Rocky 8+, Arch.
-musl-based distros (Alpine) are not supported.
+The released bundles need **glibc ≥ 2.34**, because they are built on Ubuntu
+22.04: Ubuntu 22.04+, Debian 12+, Fedora 35+, RHEL/Rocky 9+, Arch. Older
+distros (Ubuntu 20.04, Debian 11, RHEL 8) have to build from source for now
+— the code itself has no such floor. musl-based distros (Alpine) are not
+supported.
+
+The *engine* binaries DBnest downloads are a separate matter: those are built
+on AlmaLinux 8 and gated at glibc 2.28, so they are not what limits the floor
+(see [Building engine binaries](#building-engine-binaries)).
 
 In practice CI exercises Ubuntu 24.04, Ubuntu 22.04 and Debian 12 — see
-[Testing on the Debian family](#testing-on-the-debian-family). Debian 11 still
-satisfies the glibc floor, but it is no longer provable in CI: bullseye left LTS
-in August 2026, and the `debian:11` image now ships security-updated packages
-that no remaining repository serves, so the container cannot be provisioned.
+[Testing on the Debian family](#testing-on-the-debian-family). Debian 11 is not
+provable in CI either way: bullseye left LTS in August 2026, and the `debian:11`
+image now ships security-updated packages that no remaining repository serves,
+so the container cannot be provisioned.
 
 ## CLI usage
 
@@ -249,12 +266,15 @@ The full design lives in [DESIGN.md](DESIGN.md).
   exercised. Relatedly, changing the backend in Settings does not rebind a
   running app — `Manager` picks its backend once at construction, so the change
   only takes effect after a restart, with nothing telling the user that.
-- No binary release yet. `release.yml` has been run to completion once and
-  produced all four artifacts (AppImage, `.deb`, `.rpm`, CLI tarball), and the
-  `.deb` installs cleanly via `dpkg -i`, but it has never run on a tag.
+- The released bundles require glibc 2.34, so they exclude Ubuntu 20.04,
+  Debian 11 and RHEL 8 even though the source builds there. Fixing that means
+  building the release in an AlmaLinux 8 container the way `build-engines.yml`
+  already does, which is not done yet.
 - The `.deb`/`.rpm` package name comes out as `d-bnest` — Tauri derives it from
   `productName` ("DBnest") and offers no override.
 - The project licence is undecided (`Cargo.toml` says MIT, but there is no
   `LICENSE` file).
-- Manifest signing (minisign) does not exist yet.
+- Manifest signing (minisign) does not exist yet, and the release assets are
+  unsigned too — `SHA256SUMS` is the only integrity check, and it is served from
+  the same place as the artifacts it covers.
 - The app icons are still plain placeholders.
