@@ -1,244 +1,241 @@
 # DBnest
 
-Server database lokal untuk Linux — pilih engine, pilih versi, isi port, lalu
-Start. Berjalan native tanpa Docker, tanpa VM, dan tanpa root.
+Local database servers for Linux — pick an engine, pick a version, set a port,
+hit Start. Runs natively: no Docker, no VM, no root.
 
-DBnest adalah padanan [DBngin](https://dbngin.com/) untuk Linux. Nama dan aset
-DBngin/TablePlus tidak dipakai di proyek ini.
+DBnest is a DBngin-style tool for Linux. It uses none of the DBngin/TablePlus
+names or assets.
 
-> **Status: masih pra-rilis.** Manifest bawaan kini berisi artefak sungguhan
-> untuk keempat engine di x86_64, jadi `dbnest start` sudah bisa memasang dan
-> menjalankan server. Yang belum: belum ada rilis biner, aarch64 belum ada, dan
-> pengujian lintas distro baru mencakup Debian sekeluarga. Lihat
-> [Yang belum selesai](#yang-belum-selesai).
+> **Status: pre-release.** The bundled manifest now carries real artifacts for
+> all four engines on x86_64, so `dbnest start` genuinely installs and runs a
+> server. Not there yet: no binary release, no aarch64, and cross-distro
+> testing so far covers the Debian family only. See
+> [What's not done](#whats-not-done).
 
-## Apa yang sudah ada
+## What exists
 
-| Bagian | Status |
+| Area | Status |
 |---|---|
-| Engine PostgreSQL, Redis, MySQL, MariaDB | Adapter lengkap (§7.2) |
-| MongoDB | Belum — di luar cakupan saat ini |
-| CLI `dbnest` | Lengkap sesuai DESIGN.md §15 |
-| GUI (Tauri v2 + React) | Daftar server, New Server, Connection/Logs/Settings, tray |
-| Backend proses | `systemd --user` dan fallback langsung (`direct`) |
-| Preflight | root, library (`ldd`), port, panjang path socket, ruang disk |
-| Autostart | Lewat unit systemd yang di-`enable`, atau saat aplikasi dibuka |
+| PostgreSQL, Redis, MySQL, MariaDB | Adapters complete (DESIGN.md §7.2) |
+| MongoDB | Not yet — out of scope for now |
+| `dbnest` CLI | Complete per DESIGN.md §15 |
+| GUI (Tauri v2 + React) | Server list, New Server, Connection/Logs/Settings, tray |
+| Process backend | `systemd --user`, with a direct fallback |
+| Preflight | root, libraries (`ldd`), port, socket path length, disk space |
+| Autostart | Via an enabled systemd unit, or when the app opens |
 
-## Instalasi
+## Installation
 
-Belum ada rilis biner. Sampai ada, jalankan dari source (lihat
-[Pengembangan](#pengembangan)).
+No binary release yet. Until there is one, run from source (see
+[Development](#development)).
 
-Setelah ada rilis, workflow `release.yml` menghasilkan AppImage, `.deb`, `.rpm`,
-dan tarball CLI terpisah untuk x86_64. Bundle di-build di Ubuntu 22.04 supaya
-glibc-nya cukup tua untuk distro lama.
+Once released, `release.yml` produces an AppImage, `.deb`, `.rpm`, and a
+separate CLI tarball for x86_64. Bundles are built on Ubuntu 22.04 so their
+glibc requirement stays low enough for older distros.
 
-### Distro yang didukung
+### Supported distros
 
-Butuh glibc ≥ 2.28: Ubuntu 20.04+, Debian 11+, Fedora 36+, RHEL/Rocky 8+, Arch.
-Distro berbasis musl (Alpine) tidak didukung.
+Needs glibc ≥ 2.28: Ubuntu 20.04+, Debian 11+, Fedora 36+, RHEL/Rocky 8+, Arch.
+musl-based distros (Alpine) are not supported.
 
-## Pemakaian CLI
+In practice, only the Debian family is exercised by CI today — see
+[Testing on the Debian family](#testing-on-the-debian-family).
+
+## CLI usage
 
 ```bash
-dbnest engines                      # daftar engine & versi di manifest
-dbnest versions [--installed]       # versi di manifest / yang sudah terpasang
-dbnest create postgres 16.4 --name "Proyek A" --port 5433
-dbnest start "Proyek A"             # install + init otomatis kalau perlu
-dbnest list                         # instance + status + port
-dbnest info "Proyek A"              # host/port/user/URL koneksi
-dbnest logs "Proyek A" -n 200
-dbnest shell "Proyek A"             # $SHELL dengan PATH/env engine ini
-eval "$(dbnest env 'Proyek A')"     # env yang sama, di shell saat ini
-dbnest stop "Proyek A"
-dbnest delete "Proyek A" [--keep-data]
-dbnest uninstall postgres 16.4      # hapus versi (ditolak kalau masih dipakai)
-dbnest doctor                       # preflight semua instance + info sistem
+dbnest engines                      # engines and versions in the manifest
+dbnest versions [--installed]       # manifest versions / installed ones
+dbnest create postgres 16.4 --name "Project A" --port 5433
+dbnest start "Project A"            # installs and initialises if needed
+dbnest list                         # instances with status and port
+dbnest info "Project A"             # host/port/user/connection URL
+dbnest logs "Project A" -n 200
+dbnest shell "Project A"            # $SHELL with this engine's PATH and env
+eval "$(dbnest env 'Project A')"    # the same env, in your current shell
+dbnest stop "Project A"
+dbnest delete "Project A" [--keep-data]
+dbnest uninstall postgres 16.4      # remove a version (refused if still in use)
+dbnest doctor                       # preflight every instance + system info
 ```
 
-Semua perintah menerima `--json` untuk keperluan skrip. Exit code: `0` sukses,
-`1` error umum, `2` argumen salah, `3` preflight gagal.
+Every command accepts `--json` for scripting. Exit codes: `0` success,
+`1` general error, `2` bad arguments, `3` preflight failed.
 
-Instance bisa dirujuk lewat id (`pg-7f3a2c`) maupun namanya.
+Instances can be referenced by id (`pg-7f3a2c`) or by name.
 
-### Kredensial default
+### Default credentials
 
-Sama seperti DBngin, server dibuat untuk development: PostgreSQL memakai user
-`postgres` tanpa password (`trust`), MySQL/MariaDB memakai `root` tanpa
-password, Redis tanpa auth. Semua server hanya mendengarkan di `127.0.0.1` dan
-tidak ada opsi untuk mengubahnya. **Jangan pakai untuk production.**
+As with DBngin, these servers are built for development: PostgreSQL uses the
+`postgres` user with no password (`trust`), MySQL/MariaDB use `root` with no
+password, and Redis has no auth. Every server listens on `127.0.0.1` only, with
+no option to change that. **Do not use this in production.**
 
-## Manifest engine
+## Engine manifest
 
-DBnest tidak membundel binary engine. Daftar versi dan URL unduhannya datang
-dari sebuah manifest JSON (DESIGN.md §5), dengan urutan: `manifest_url` di
-settings → cache hasil unduhan terakhir (`$XDG_CACHE_HOME/dbnest/manifest.json`)
-→ salinan bawaan di dalam binary.
+DBnest does not bundle engine binaries. Versions and their download URLs come
+from a JSON manifest (DESIGN.md §5), resolved in this order: `manifest_url` from
+settings → the last downloaded copy
+(`$XDG_CACHE_HOME/dbnest/manifest.json`) → the copy embedded in the binary.
 
-Manifest bawaan sudah berisi artefak sungguhan untuk keempat engine di
-x86_64 — semuanya diisi oleh [`build-engines.yml`](#membangun-binary-engine),
-bukan diketik manual:
+The bundled manifest holds real artifacts for all four engines on x86_64, every
+one of them filled in by [`build-engines.yml`](#building-engine-binaries) rather
+than typed by hand:
 
-| Engine | Versi | Sumber artefak | sha256 |
+| Engine | Version | Artifact source | sha256 |
 |---|---|---|---|
-| Redis | 7.4.0 | Releases repo ini (dibangun sendiri) | diukur saat build |
-| PostgreSQL | 16.4 | Releases repo ini (dibangun sendiri) | diukur saat build |
-| MariaDB | 11.4.4 | archive.mariadb.org | cocok dengan `sha256sums.txt` resmi |
-| MySQL | 8.4.3 | cdn.mysql.com (arsip) | diukur dari unduhan HTTPS — lihat catatan |
+| Redis | 7.4.0 | this repo's Releases (built here) | measured at build time |
+| PostgreSQL | 16.4 | this repo's Releases (built here) | measured at build time |
+| MariaDB | 11.4.4 | archive.mariadb.org | matches upstream `sha256sums.txt` |
+| MySQL | 8.4.3 | cdn.mysql.com (archive) | measured from the HTTPS download — see note |
 
-**Catatan MySQL:** untuk tarball ini upstream tidak menerbitkan berkas checksum
-yang bisa diambil otomatis, jadi sha256 di manifest diukur dari unduhan HTTPS
-di runner dan belum dicocokkan dengan nilai resmi. MariaDB dan PostgreSQL
-dicocokkan dengan checksum resmi upstream. Selisih ini disengaja dan dicatat,
-bukan disamarkan.
+**A note on MySQL:** upstream publishes no automatically fetchable checksum file
+for that tarball, so the sha256 in the manifest was measured from the runner's
+HTTPS download and has never been cross-checked against an official value.
+PostgreSQL's and MariaDB's sources *were* cross-checked against upstream
+checksums. That difference is deliberate and recorded rather than glossed over.
 
-Untuk menambah versi atau arsitektur, jalankan `build-engines.yml` lagi; untuk
-memperbarui tanpa rilis ulang aplikasi, host manifestnya (GitHub
-Pages/Releases) lalu isi **Manifest URL** di Settings.
+To add a version or an architecture, run `build-engines.yml` again. To ship new
+versions without releasing a new app build, host the manifest yourself (GitHub
+Pages or Releases) and set **Manifest URL** in Settings — the app fetches it on
+launch or via **Refresh versions**.
 
-Setelah manifest di-host, versi baru cukup ditambahkan di sana: aplikasi
-mengambilnya saat dibuka atau lewat tombol **Refresh versions**, tanpa perlu
-rilis ulang.
+Every artifact's sha256 is verified before extraction, and extraction rejects
+archive entries with absolute paths or `..` in them — hard link targets
+included.
 
-Semua artefak diverifikasi sha256-nya sebelum diekstrak, dan ekstraksi menolak
-entri arsip berpath absolut atau mengandung `..` — termasuk untuk target hard
-link.
+## Building engine binaries
 
-## Membangun binary engine
+`.github/workflows/build-engines.yml` (run it manually via **Run workflow**)
+fills the manifest with real data for all four engines, following DESIGN.md §19.
 
-`.github/workflows/build-engines.yml` (jalankan manual lewat **Run workflow**)
-mengisi manifest dengan data sungguhan untuk keempat engine. Alurnya mengikuti
-DESIGN.md §19.
-
-| Engine | Cara | Hasil di manifest |
+| Engine | How | URL in the manifest |
 |---|---|---|
-| Redis, PostgreSQL | dibangun dari source di container AlmaLinux 8 | url Releases repo ini |
-| MySQL, MariaDB | tarball resmi upstream diunduh dan diverifikasi | url resmi upstream |
+| Redis, PostgreSQL | built from source in an AlmaLinux 8 container | this repo's Releases |
+| MySQL, MariaDB | official upstream tarball downloaded and verified | upstream's own URL |
 
-Keduanya bermuara di langkah yang sama: sha256 diukur di runner, lalu sebuah PR
-membuka pembaruan `manifest/manifest.json`. Tidak ada nilai yang diketik
-manual. Untuk MySQL dan MariaDB, tarball-nya juga dicek bentuknya
-(`scripts/check-tarball-layout.sh`) supaya `strip_components: 1` di manifest
-benar-benar menghasilkan `bin/` di akar.
+Both paths converge on the same step: sha256 is measured on the runner, then a
+pull request updates `manifest/manifest.json`. No value is ever typed by hand.
+For MySQL and MariaDB the tarball's shape is checked too
+(`scripts/check-tarball-layout.sh`), so that `strip_components: 1` really does
+yield `bin/` at the root.
 
-AlmaLinux 8 dipakai karena glibc-nya 2.28 — yang tertua di antara distro yang
-didukung. `scripts/check-portable.sh` menegakkan janji itu: build gagal kalau
-ada binary yang menuntut glibc lebih baru, atau menaut library yang SONAME-nya
-berbeda antar distro. Karena itu PostgreSQL dibangun tanpa ICU, readline, dan
-OpenSSL (SONAME ketiganya berbeda antara EL8 dan Ubuntu 24.04); konsekuensinya
-`psql` tidak punya line editing.
+AlmaLinux 8 is used because its glibc is 2.28 — the oldest among supported
+distros. `scripts/check-portable.sh` enforces that promise: the build fails if
+any binary demands a newer glibc, or links a library whose SONAME differs across
+distros. That is why PostgreSQL is built without ICU, readline, and OpenSSL (all
+three have different SONAMEs on EL8 versus Ubuntu 24.04); the cost is that
+`psql` has no line editing.
 
-Tiap build juga di-smoke test sebelum dipaketkan: Redis dijalankan lalu
-di-`PING`, dan PostgreSQL di-`initdb` serta di-query sebagai user biasa dari
-direktori yang berbeda dari prefix build-nya, sekaligus membuktikan pohonnya
-relokatabel.
+Each build is smoke-tested before packaging: Redis is started and `PING`ed, and
+PostgreSQL is `initdb`'d and queried as an unprivileged user from a directory
+different from its build prefix — which also proves the tree is relocatable.
 
-Sumber PostgreSQL diverifikasi terhadap berkas `.sha256` resmi dari
-postgresql.org, dan `scripts/verify-upstream-checksum.sh` melakukan hal yang
-sama untuk MySQL dan MariaDB bila upstream menerbitkannya. Kalau tidak ada
-checksum yang bisa diambil otomatis — seperti pada Redis — sha256-nya diukur
-dari unduhan HTTPS di runner dan diberi peringatan di log, bukan dikarang.
-Cocokkan sekali dengan halaman unduhan resmi, lalu isikan ke input
-`redis_src_sha256` supaya build berikutnya menolak sumber yang berubah.
+PostgreSQL's source is verified against the official `.sha256` from
+postgresql.org, and `scripts/verify-upstream-checksum.sh` does the same for
+MySQL and MariaDB when upstream publishes one. When no checksum can be fetched
+— as with Redis — the sha256 is measured from the runner's HTTPS download and
+flagged with a warning in the log, never invented. Check it once against the
+official download page, then pass it as the `redis_src_sha256` input so later
+builds reject a changed source.
 
-## Menguji di Debian dan turunannya
+Prerequisite: **Settings → Actions → General → "Allow GitHub Actions to create
+and approve pull requests"** must be enabled for the manifest PR step to work.
 
-Job `integration` di `ci.yml` (juga manual) memasang engine sungguhan dari
-manifest lalu menjalankannya di Ubuntu 24.04, Ubuntu 22.04, Debian 12, dan
-Debian 11. Ini yang membuktikan binary hasil `build-engines.yml` benar-benar
-jalan di distro target, bukan cuma terbangun.
+Only x86_64 is built so far; aarch64 is waiting on an ARM runner.
 
-Prasyarat: **Settings → Actions → General → "Allow GitHub Actions to create and
-approve pull requests"** harus aktif supaya langkah PR manifest berhasil.
+## Testing on the Debian family
 
-Arsitektur yang dibangun baru x86_64; aarch64 menunggu runner ARM.
+The `integration` job in `ci.yml` (also manual) installs real engines from the
+manifest and runs them on Ubuntu 24.04, Ubuntu 22.04, Debian 12, and Debian 11.
+This is what demonstrates that binaries from `build-engines.yml` actually run on
+the target distros, rather than merely compiling.
 
-## Lokasi data
+## Data locations
 
-Semua per user, mengikuti XDG, tanpa root:
+Everything is per-user, XDG-compliant, and root-free:
 
 ```
 $XDG_DATA_HOME/dbnest/      binaries/, instances/, compat-lib/, tmp/
 $XDG_CONFIG_HOME/dbnest/    instances.json, settings.json
 $XDG_CACHE_HOME/dbnest/     manifest.json, downloads/
-~/.config/systemd/user/     dbnest-<id>.service (kalau backend systemd)
+~/.config/systemd/user/     dbnest-<id>.service (with the systemd backend)
 ```
 
-## Backend proses
+## Process backend
 
-`auto` (default) memakai `systemd --user` kalau tersedia, selain itu menjalankan
-proses langsung dengan `setsid` supaya server tetap hidup setelah aplikasi
-ditutup. Pilihannya bisa dipaksa di Settings; `dbnest doctor` menampilkan backend
-yang sedang aktif.
+`auto` (the default) uses `systemd --user` when available, and otherwise starts
+the process directly with `setsid` so servers outlive the app. You can force
+either in Settings; `dbnest doctor` reports which backend is active.
 
-Dengan systemd, instance ber-`autostart` dijalankan otomatis saat login lewat
-unit yang di-`enable`. Agar server tetap berjalan tanpa login sama sekali:
+Under systemd, instances marked `autostart` start at login via an enabled unit.
+To keep servers running without logging in at all:
 
 ```bash
 loginctl enable-linger $USER
 ```
 
-## Pengembangan
+## Development
 
 ```bash
 cargo build --workspace
 cargo test --workspace
 cargo fmt --all && cargo clippy --workspace -- -D warnings
 
-cd ui && npm install && npm run dev   # frontend saja
-cargo tauri dev                        # GUI lengkap, dari root repo
+cd ui && npm install && npm run dev   # frontend only
+cargo tauri dev                        # full GUI, from the repo root
 
 cargo run -p dbnest-cli -- list        # CLI
 ```
 
-Tes integrasi mengunduh binary sungguhan dan menjalankan server, jadi ditandai
-`#[ignore]`:
+The integration tests download real binaries and run real servers, so they are
+marked `#[ignore]`:
 
 ```bash
 DBNEST_IT=1 cargo test -p dbnest-core -- --ignored
 ```
 
-Sejak manifest berisi artefak sungguhan, tes ini bisa dijalankan — dan job
-`integration` di CI menjalankannya di Debian sekeluarga.
+Now that the manifest carries real artifacts these can actually run, and CI's
+`integration` job runs them across the Debian family.
 
-### Dependensi sistem untuk membangun GUI
+### System dependencies for building the GUI
 
-Ubuntu 22.04 dan 24.04:
+Ubuntu 22.04 and 24.04:
 
 ```bash
 sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev \
   libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev patchelf
 ```
 
-Tauri v2 butuh webkit2gtk **4.1** (paket `-4.0-dev` hanya untuk Tauri v1).
-Untuk mem-bundle AppImage, tambahkan `xdg-utils`.
+Tauri v2 needs webkit2gtk **4.1** (the `-4.0-dev` packages are for Tauri v1).
+Add `xdg-utils` if you want to bundle an AppImage.
 
-### Struktur
+### Layout
 
 ```
-crates/core/   dbnest-core — semua logika bisnis
-crates/cli/    binary `dbnest`
-src-tauri/     aplikasi Tauri v2 (commands/events/tray tipis di atas core)
+crates/core/   dbnest-core — all business logic
+crates/cli/    the `dbnest` binary
+src-tauri/     Tauri v2 app (thin commands/events/tray over core)
 ui/            React + TypeScript + Vite
-manifest/      manifest.json yang di-embed sebagai fallback
+manifest/      manifest.json, embedded as the fallback copy
 ```
 
-Rancangan lengkap ada di [DESIGN.md](DESIGN.md).
+The full design lives in [DESIGN.md](DESIGN.md).
 
-## Yang belum selesai
+## What's not done
 
-- Baru x86_64. aarch64 menunggu runner ARM, dan entri arsitektur itu dihapus
-  dari manifest (bukan dibiarkan `TODO`) supaya pengguna aarch64 mendapat
-  "versi tidak tersedia" yang jujur, bukan "belum diverifikasi".
-- sha256 MySQL 8.4.3 belum dicocokkan dengan checksum resmi upstream (lihat
-  [Manifest engine](#manifest-engine)); yang lain sudah.
-- MongoDB belum didukung.
-- Belum ada rilis biner. Ketiga bundle (AppImage, `.deb`, `.rpm`) sudah terbukti
-  bisa dibangun dan `.deb`-nya terpasang bersih lewat `dpkg -i`, tapi
-  `release.yml` sendiri belum pernah jalan di sebuah tag.
-- Nama paket `.deb`/`.rpm` keluar sebagai `d-bnest` — Tauri menurunkannya dari
-  `productName` ("DBnest") dan belum ada opsi untuk menimpanya.
-- Lisensi proyek belum ditetapkan (`Cargo.toml` menyebut MIT, tapi belum ada
-  file `LICENSE`).
-- Tanda tangan manifest (minisign) belum ada.
-- Ikon aplikasi masih placeholder polos.
+- x86_64 only. aarch64 waits on an ARM runner, and that architecture's entries
+  are removed from the manifest rather than left as `TODO`, so aarch64 users get
+  an honest "version unavailable" instead of "not verified".
+- MySQL 8.4.3's sha256 has not been cross-checked against an official upstream
+  checksum (see [Engine manifest](#engine-manifest)); the others have.
+- MongoDB is not supported.
+- No binary release yet. `release.yml` has been run to completion once and
+  produced all four artifacts (AppImage, `.deb`, `.rpm`, CLI tarball), and the
+  `.deb` installs cleanly via `dpkg -i`, but it has never run on a tag.
+- The `.deb`/`.rpm` package name comes out as `d-bnest` — Tauri derives it from
+  `productName` ("DBnest") and offers no override.
+- The project licence is undecided (`Cargo.toml` says MIT, but there is no
+  `LICENSE` file).
+- Manifest signing (minisign) does not exist yet.
+- The app icons are still plain placeholders.
