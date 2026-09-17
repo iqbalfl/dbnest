@@ -20,16 +20,22 @@ on:
   workflow_dispatch:
     inputs:
       engine:
-        description: Engine yang dibangun
+        description: Engine yang diproses
         type: choice
-        options: [both, redis, postgres]
-        default: both
+        options: [all, redis, postgres, mysql, mariadb]
+        default: all
       redis_version:
-        description: Versi Redis
+        description: Versi Redis (dibangun dari source)
         default: "7.4.0"
       postgres_version:
-        description: Versi PostgreSQL
+        description: Versi PostgreSQL (dibangun dari source)
         default: "16.4"
+      mysql_version:
+        description: Versi MySQL (tarball resmi)
+        default: "8.4.3"
+      mariadb_version:
+        description: Versi MariaDB (tarball resmi)
+        default: "11.4.4"
       redis_src_sha256:
         description: >-
           sha256 tarball sumber Redis. Kosong = hanya dicatat, diisi = wajib cocok.
@@ -46,7 +52,7 @@ env:
 jobs:
   redis:
     name: Redis ${{ inputs.redis_version }} (x86_64)
-    if: inputs.engine == 'both' || inputs.engine == 'redis'
+    if: inputs.engine == 'all' || inputs.engine == 'redis'
     runs-on: ubuntu-24.04
     container: almalinux:8
     steps:
@@ -123,7 +129,7 @@ jobs:
 
   postgres:
     name: PostgreSQL ${{ inputs.postgres_version }} (x86_64)
-    if: inputs.engine == 'both' || inputs.engine == 'postgres'
+    if: inputs.engine == 'all' || inputs.engine == 'postgres'
     runs-on: ubuntu-24.04
     container: almalinux:8
     steps:
@@ -209,12 +215,80 @@ jobs:
             *.tar.gz
             *.tar.gz.sha256
 
+  # MySQL dan MariaDB menerbitkan tarball Linux resmi, jadi tidak perlu
+  # dibangun — cukup diverifikasi: unduh dari sumber resmi di runner, cocokkan
+  # dengan checksum yang diterbitkan upstream kalau ada, hitung sha256-nya
+  # sendiri, lalu pastikan bentuk arsipnya cocok dengan yang diharapkan
+  # manifest. Tidak ada nilai yang dikarang: semuanya diukur di runner.
+  mysql:
+    name: MySQL ${{ inputs.mysql_version }} (verifikasi tarball resmi)
+    if: inputs.engine == 'all' || inputs.engine == 'mysql'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and verify
+        env:
+          VERSION: ${{ inputs.mysql_version }}
+        run: |
+          set -euo pipefail
+          # 8.4.3 -> seri MySQL-8.4
+          SERIES="MySQL-$(echo "$VERSION" | cut -d. -f1,2)"
+          FILE="mysql-${VERSION}-linux-glibc2.28-x86_64.tar.xz"
+          URL="https://cdn.mysql.com/Downloads/${SERIES}/${FILE}"
+          echo "sumber: $URL"
+          curl -fL --retry 3 -o "$FILE" "$URL"
+          ./scripts/verify-upstream-checksum.sh "$FILE" "${URL}.sha256"
+          ./scripts/check-tarball-layout.sh "$FILE" bin/mysqld bin/mysql
+          mkdir -p out
+          echo "$URL" > out/url.txt
+          sha256sum "$FILE" | cut -d' ' -f1 > out/sha256.txt
+          cat out/url.txt out/sha256.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upstream-mysql-${{ inputs.mysql_version }}
+          path: out/
+
+  mariadb:
+    name: MariaDB ${{ inputs.mariadb_version }} (verifikasi tarball resmi)
+    if: inputs.engine == 'all' || inputs.engine == 'mariadb'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and verify
+        env:
+          VERSION: ${{ inputs.mariadb_version }}
+        run: |
+          set -euo pipefail
+          DIR="https://archive.mariadb.org/mariadb-${VERSION}"
+          FILE="mariadb-${VERSION}-linux-systemd-x86_64.tar.gz"
+          URL="${DIR}/bintar-linux-systemd-x86_64/${FILE}"
+          echo "sumber: $URL"
+          curl -fL --retry 3 -o "$FILE" "$URL"
+          ./scripts/verify-upstream-checksum.sh "$FILE" \
+            "${URL}.sha256" \
+            "${DIR}/sha256sums.txt" \
+            "${DIR}/bintar-linux-systemd-x86_64/sha256sums.txt"
+          ./scripts/check-tarball-layout.sh "$FILE" bin/mariadbd bin/mariadb
+          mkdir -p out
+          echo "$URL" > out/url.txt
+          sha256sum "$FILE" | cut -d' ' -f1 > out/sha256.txt
+          cat out/url.txt out/sha256.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upstream-mariadb-${{ inputs.mariadb_version }}
+          path: out/
+
   publish:
     name: Publish and update manifest
-    needs: [redis, postgres]
+    needs: [redis, postgres, mysql, mariadb]
     if: >-
       always() && inputs.publish &&
-      (needs.redis.result == 'success' || needs.postgres.result == 'success')
+      (needs.redis.result == 'success' || needs.postgres.result == 'success' ||
+       needs.mysql.result == 'success' || needs.mariadb.result == 'success')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -225,7 +299,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: engine-*
+          pattern: "{engine,upstream}-*"
 
       - name: Publish releases and patch manifest
         env:
@@ -266,6 +340,22 @@ jobs:
             python3 scripts/update_manifest.py \
               --engine "$ENGINE" --version "$VERSION" --arch x86_64 \
               --url "$URL" --sha256 "$SHA"
+          done
+
+          # Engine yang memakai tarball resmi upstream: tidak ada yang diunggah,
+          # manifest langsung menunjuk ke URL resminya.
+          for dir in artifacts/upstream-*; do
+            [ -d "$dir" ] || continue
+            rest="$(basename "$dir")"; rest="${rest#upstream-}"
+            ENGINE="${rest%%-*}"
+            VERSION="${rest#*-}"
+            if [ ! -f "$dir/url.txt" ] || [ ! -f "$dir/sha256.txt" ]; then
+              echo "::error::$dir tidak lengkap (butuh url.txt dan sha256.txt)"
+              exit 1
+            fi
+            python3 scripts/update_manifest.py \
+              --engine "$ENGINE" --version "$VERSION" --arch x86_64 \
+              --url "$(cat "$dir/url.txt")" --sha256 "$(cat "$dir/sha256.txt")"
           done
 
       - name: Open manifest pull request
