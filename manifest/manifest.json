@@ -9,17 +9,11 @@
         {
           "version": "7.4.0",
           "channel": "stable",
-          "verified": false,
+          "verified": true,
           "artifacts": {
             "x86_64": {
-              "url": "TODO",
-              "sha256": "TODO",
-              "format": "tar.gz",
-              "strip_components": 1
-            },
-            "aarch64": {
-              "url": "TODO",
-              "sha256": "TODO",
+              "url": "https://github.com/iqbalfl/dbnest/releases/download/engines-redis-7.4.0/redis-7.4.0-x86_64-linux-gnu.tar.gz",
+              "sha256": "9c62835d129f3aa1141522a9411608d9964e1166449650f4641093dc673fb404",
               "format": "tar.gz",
               "strip_components": 1
             }
@@ -34,17 +28,11 @@
         {
           "version": "16.4",
           "channel": "stable",
-          "verified": false,
+          "verified": true,
           "artifacts": {
             "x86_64": {
-              "url": "TODO",
-              "sha256": "TODO",
-              "format": "tar.gz",
-              "strip_components": 1
-            },
-            "aarch64": {
-              "url": "TODO",
-              "sha256": "TODO",
+              "url": "https://github.com/iqbalfl/dbnest/releases/download/engines-postgres-16.4/postgres-16.4-x86_64-linux-gnu.tar.gz",
+              "sha256": "8cda6e4bf274e85b1f4cf0a187c5cc784a2969ef4b8665025dabb88d0019ce92",
               "format": "tar.gz",
               "strip_components": 1
             }
