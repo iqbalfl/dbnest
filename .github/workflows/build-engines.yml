@@ -232,11 +232,22 @@ jobs:
           VERSION: ${{ inputs.mysql_version }}
         run: |
           set -euo pipefail
-          # 8.4.3 -> seri MySQL-8.4
-          SERIES="MySQL-$(echo "$VERSION" | cut -d. -f1,2)"
-          FILE="mysql-${VERSION}-linux-glibc2.28-x86_64.tar.xz"
-          URL="https://cdn.mysql.com/Downloads/${SERIES}/${FILE}"
-          echo "sumber: $URL"
+          # 8.4.3 -> seri 8.4
+          SERIES="$(echo "$VERSION" | cut -d. -f1,2)"
+          # MySQL memindahkan rilis yang bukan terbaru dari CDN "current" ke
+          # direktori arsip, dan sufiks glibc-nya berbeda antar seri, jadi URL
+          # tidak ditebak melainkan dicari.
+          CANDIDATES=()
+          for G in glibc2.28 glibc2.17; do
+            F="mysql-${VERSION}-linux-${G}-x86_64.tar.xz"
+            CANDIDATES+=(
+              "https://cdn.mysql.com/Downloads/MySQL-${SERIES}/${F}"
+              "https://cdn.mysql.com/archives/mysql-${SERIES}/${F}"
+              "https://downloads.mysql.com/archives/get/p/23/file/${F}"
+            )
+          done
+          URL="$(./scripts/resolve-upstream-url.sh "${CANDIDATES[@]}")"
+          FILE="$(basename "${URL%%\?*}")"
           curl -fL --retry 3 -o "$FILE" "$URL"
           ./scripts/verify-upstream-checksum.sh "$FILE" "${URL}.sha256"
           ./scripts/check-tarball-layout.sh "$FILE" bin/mysqld bin/mysql
@@ -264,8 +275,11 @@ jobs:
           set -euo pipefail
           DIR="https://archive.mariadb.org/mariadb-${VERSION}"
           FILE="mariadb-${VERSION}-linux-systemd-x86_64.tar.gz"
-          URL="${DIR}/bintar-linux-systemd-x86_64/${FILE}"
-          echo "sumber: $URL"
+          URL="$(./scripts/resolve-upstream-url.sh \
+            "${DIR}/bintar-linux-systemd-x86_64/${FILE}" \
+            "https://downloads.mariadb.org/rest-api/mariadb/${VERSION}/${FILE}" \
+            "${DIR}/bintar-linux-x86_64/mariadb-${VERSION}-linux-x86_64.tar.gz")"
+          FILE="$(basename "$URL")"
           curl -fL --retry 3 -o "$FILE" "$URL"
           ./scripts/verify-upstream-checksum.sh "$FILE" \
             "${URL}.sha256" \
