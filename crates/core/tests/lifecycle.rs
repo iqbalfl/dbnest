@@ -6,11 +6,16 @@
 //!   DBNEST_IT=1 cargo test -p dbnest-core -- --ignored
 //!
 //! Prasyarat: entri versi terkait di `manifest/manifest.json` harus
-//! `"verified": true` dengan URL/sha256 asli (bukan placeholder `"TODO"`).
-//! Manifest yang di-embed saat ini belum diverifikasi (lihat CLAUDE.md:
-//! "Jangan mengarang URL unduhan atau sha256"), jadi tes ini akan gagal
-//! dengan pesan yang jelas sampai manifest dilengkapi manusia.
+//! `"verified": true` dengan URL/sha256 asli. Sejak `build-engines.yml`
+//! dijalankan, manifest bawaan sudah memenuhi itu untuk keempat engine di
+//! x86_64; kalau suatu entri kembali kosong, tes gagal dengan pesan yang
+//! menyebutkan entri mana.
+//!
+//! Tes ini juga harus dijalankan sebagai user biasa: preflight menolak root
+//! (DESIGN §8), jadi di container CI yang berjalan sebagai root binary tesnya
+//! dijalankan lewat user tanpa hak istimewa.
 
+use dbnest_core::config::ProcessBackendKind;
 use dbnest_core::manager::{CreateInstanceRequest, Manager};
 use dbnest_core::model::{EngineKind, InstanceStatus};
 use dbnest_core::paths::Paths;
@@ -23,10 +28,27 @@ fn require_it_flag() {
     }
 }
 
+/// Membuat Manager yang seluruh pathnya terisolasi di `root`, dengan backend
+/// dipaksa ke `direct`.
+///
+/// Backend systemd tidak bisa dipakai di tes seperti ini: unit ditulis ke
+/// `config_dir.parent()/systemd/user` (lihat `Paths::config_dir_for_systemd`),
+/// yang di bawah root sementara menjadi direktori yang tidak pernah dibaca
+/// systemd — jadi `systemctl --user start` menjawab "Unit not found". Yang
+/// diuji di sini adalah daur hidup engine, bukan integrasi systemd, jadi
+/// backendnya dipilih eksplisit ketimbang bergantung pada pemilihan `auto`
+/// yang hasilnya berbeda antar mesin.
+fn isolated_manager(root: &std::path::Path) -> Manager {
+    let manager = Manager::with_paths(Paths::under_root(root)).unwrap();
+    let mut settings = manager.get_settings().unwrap();
+    settings.process_backend = ProcessBackendKind::Direct;
+    manager.update_settings(settings).unwrap();
+    manager
+}
+
 async fn full_lifecycle(engine: EngineKind, version: &str) {
     let tmp = tempfile::tempdir().unwrap();
-    let paths = Paths::under_root(tmp.path());
-    let manager = Manager::with_paths(paths).unwrap();
+    let manager = isolated_manager(tmp.path());
 
     let manifest = manager.manifest().unwrap();
     let verified = manifest
@@ -103,8 +125,7 @@ async fn mariadb_full_lifecycle() {
 async fn two_mysql_instances_run_concurrently() {
     require_it_flag();
     let tmp = tempfile::tempdir().unwrap();
-    let paths = Paths::under_root(tmp.path());
-    let manager = Manager::with_paths(paths).unwrap();
+    let manager = isolated_manager(tmp.path());
 
     let manifest = manager.manifest().unwrap();
     let verified = manifest
@@ -161,8 +182,7 @@ async fn two_mysql_instances_run_concurrently() {
 async fn two_postgres_instances_run_concurrently() {
     require_it_flag();
     let tmp = tempfile::tempdir().unwrap();
-    let paths = Paths::under_root(tmp.path());
-    let manager = Manager::with_paths(paths).unwrap();
+    let manager = isolated_manager(tmp.path());
 
     let manifest = manager.manifest().unwrap();
     let verified = manifest

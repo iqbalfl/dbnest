@@ -190,4 +190,30 @@ jobs:
       - name: Engine lifecycle (all four engines)
         env:
           DBNEST_IT: "1"
-        run: cargo test -p dbnest-core -- --ignored --test-threads=1
+        run: |
+          set -eu
+          # dbnest menolak berjalan sebagai root lewat preflight (DESIGN §8),
+          # dan container di sini berjalan sebagai root. Yang menyesuaikan
+          # adalah tesnya, bukan preflightnya: binary tes dikompilasi sebagai
+          # root lalu dijalankan sebagai user tanpa hak istimewa. Leg runner
+          # non-container sudah non-root, jadi langsung jalan.
+          if [ "$(id -u)" -ne 0 ]; then
+            cargo test -p dbnest-core -- --ignored --test-threads=1
+            exit 0
+          fi
+
+          cargo test -p dbnest-core --test lifecycle --no-run
+          BIN="$(find target/debug/deps -maxdepth 1 -type f -executable \
+            -name 'lifecycle-*' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
+          if [ -z "$BIN" ]; then
+            echo "::error::binary tes lifecycle tidak ditemukan setelah --no-run"
+            exit 1
+          fi
+          echo "menjalankan $BIN sebagai user tanpa hak istimewa"
+
+          id -u dbnestci >/dev/null 2>&1 || useradd -m dbnestci
+          # Binary dan pohon target harus terbaca user itu; /tmp dipakai untuk
+          # tempdir tiap tes dan sudah writable untuk semua.
+          chmod -R a+rX target/debug/deps
+          chmod a+rX . target target/debug
+          su dbnestci -s /bin/bash -c "DBNEST_IT=1 '$PWD/$BIN' --ignored --test-threads=1"
