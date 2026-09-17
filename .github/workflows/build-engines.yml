@@ -22,7 +22,12 @@ on:
       engine:
         description: Engine yang diproses
         type: choice
-        options: [all, redis, postgres, mysql, mariadb]
+        # `built` = yang dikompilasi sendiri (Redis, PostgreSQL);
+        # `upstream` = yang memakai tarball resmi (MySQL, MariaDB). Keduanya
+        # ada supaya satu grup bisa diperbarui tanpa membangun ulang yang lain
+        # — build ulang menghasilkan sha256 baru, jadi tarball yang sudah
+        # dirujuk manifest sebaiknya tidak diganti tanpa alasan.
+        options: [all, built, upstream, redis, postgres, mysql, mariadb]
         default: all
       redis_version:
         description: Versi Redis (dibangun dari source)
@@ -52,7 +57,7 @@ env:
 jobs:
   redis:
     name: Redis ${{ inputs.redis_version }} (x86_64)
-    if: inputs.engine == 'all' || inputs.engine == 'redis'
+    if: contains(fromJSON('["all","built","redis"]'), inputs.engine)
     runs-on: ubuntu-24.04
     container: almalinux:8
     steps:
@@ -129,7 +134,7 @@ jobs:
 
   postgres:
     name: PostgreSQL ${{ inputs.postgres_version }} (x86_64)
-    if: inputs.engine == 'all' || inputs.engine == 'postgres'
+    if: contains(fromJSON('["all","built","postgres"]'), inputs.engine)
     runs-on: ubuntu-24.04
     container: almalinux:8
     steps:
@@ -222,7 +227,7 @@ jobs:
   # manifest. Tidak ada nilai yang dikarang: semuanya diukur di runner.
   mysql:
     name: MySQL ${{ inputs.mysql_version }} (verifikasi tarball resmi)
-    if: inputs.engine == 'all' || inputs.engine == 'mysql'
+    if: contains(fromJSON('["all","upstream","mysql"]'), inputs.engine)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -263,7 +268,7 @@ jobs:
 
   mariadb:
     name: MariaDB ${{ inputs.mariadb_version }} (verifikasi tarball resmi)
-    if: inputs.engine == 'all' || inputs.engine == 'mariadb'
+    if: contains(fromJSON('["all","upstream","mariadb"]'), inputs.engine)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
