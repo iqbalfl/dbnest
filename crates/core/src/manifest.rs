@@ -303,9 +303,78 @@ mod tests {
 
     #[test]
     fn unverified_entries_are_rejected() {
-        let manifest = Manifest::embedded().unwrap();
+        // Sengaja memakai fixture sendiri, bukan manifest bawaan: yang diuji
+        // adalah gerbang `verified`, bukan keadaan data yang kebetulan sedang
+        // dikirim. Sebelumnya tes ini bergantung pada entri bawaan yang masih
+        // TODO, jadi ia ikut gagal begitu manifest diisi data sungguhan.
+        let json = r#"{
+            "schema_version": 1,
+            "generated_at": "2026-01-01T00:00:00Z",
+            "engines": {
+                "redis": {
+                    "display_name": "Redis",
+                    "default_port": 6379,
+                    "versions": [{
+                        "version": "7.4.0",
+                        "channel": "stable",
+                        "verified": false,
+                        "artifacts": {
+                            "x86_64": {"url": "TODO", "sha256": "TODO", "format": "tar.gz", "strip_components": 1}
+                        }
+                    }]
+                }
+            }
+        }"#;
+        let manifest = Manifest::parse(json).unwrap();
         let err = select_artifact(&manifest, EngineKind::Redis, "7.4.0").unwrap_err();
         assert!(err.to_string().contains("belum diverifikasi"));
+    }
+
+    #[test]
+    fn embedded_manifest_entries_are_all_usable() {
+        // Kebalikannya: apa pun isi manifest bawaan saat ini, entri yang
+        // ditandai `verified` harus benar-benar punya url dan sha256 yang
+        // terisi — supaya data hasil build-engines.yml tidak pernah masuk
+        // setengah jadi.
+        let manifest = Manifest::embedded().unwrap();
+        for engine in [
+            EngineKind::Postgres,
+            EngineKind::Mysql,
+            EngineKind::Mariadb,
+            EngineKind::Redis,
+        ] {
+            let Some(catalog) = manifest.engine_catalog(engine) else {
+                continue;
+            };
+            for entry in &catalog.versions {
+                if !entry.verified {
+                    continue;
+                }
+                let artifacts = entry.artifacts.as_ref().unwrap_or_else(|| {
+                    panic!("{engine} {} verified tanpa artifacts", entry.version)
+                });
+                assert!(
+                    !artifacts.is_empty(),
+                    "{engine} {} verified tapi tidak punya artefak",
+                    entry.version
+                );
+                for (arch, artifact) in artifacts {
+                    assert!(
+                        artifact.url.starts_with("https://"),
+                        "{engine} {} {arch}: url bukan https ({})",
+                        entry.version,
+                        artifact.url
+                    );
+                    assert!(
+                        artifact.sha256.len() == 64
+                            && artifact.sha256.chars().all(|c| c.is_ascii_hexdigit()),
+                        "{engine} {} {arch}: sha256 tidak valid ({})",
+                        entry.version,
+                        artifact.sha256
+                    );
+                }
+            }
+        }
     }
 
     #[test]
