@@ -132,17 +132,38 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          set -eux
+          set -eu
           SUDO=""
           [ "$(id -u)" -eq 0 ] || SUDO=sudo
-          $SUDO apt-get update
-          $SUDO apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential pkg-config xz-utils procps
+
+          # Indeks apt dan isi pool di deb.debian.org bisa sesaat tidak sinkron
+          # — leg Debian 11 pernah gagal dengan 404 pada belasan berkas
+          # bullseye-security tepat setelah `apt-get update` sukses. Karena itu
+          # setiap pemasangan dicoba beberapa kali dengan indeks yang di-refresh
+          # ulang, bukan sekali lalu menyerah.
+          apt_install() {
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              if $SUDO apt-get update -o Acquire::Retries=3 \
+                && $SUDO apt-get install -y --no-install-recommends \
+                     -o Acquire::Retries=3 "$@"; then
+                return 0
+              fi
+              echo "::warning::apt gagal untuk [$*] pada percobaan $attempt/3, mengulang"
+              attempt=$((attempt + 1))
+              sleep 10
+            done
+            return 1
+          }
+
+          apt_install ca-certificates curl git build-essential pkg-config \
+            xz-utils procps
+
           # MySQL/MariaDB butuh libaio dan libncurses dari sistem (DESIGN §8).
           # Namanya berbeda antar rilis (libaio1 vs libaio1t64 di Ubuntu 24.04),
-          # jadi dicoba satu per satu.
+          # jadi dicoba satu per satu dan yang tidak ada dilewati.
           for pkg in libaio1 libaio1t64 libncurses6 libncurses5 libtinfo6 libnuma1; do
-            $SUDO apt-get install -y --no-install-recommends "$pkg" || true
+            apt_install "$pkg" || echo "  $pkg tidak tersedia di rilis ini, dilewati"
           done
 
       - uses: actions/checkout@v4

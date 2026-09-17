@@ -19,12 +19,11 @@ pub async fn download_with_progress(
         tokio::fs::create_dir_all(dir).await?;
     }
 
-    let response = client
-        .get(url)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await?
-        .error_for_status()?;
+    // Tanpa batas waktu total: `RequestBuilder::timeout` di reqwest mencakup
+    // pembacaan body, jadi 10 detik di sini membuat setiap artefak yang lebih
+    // besar dari beberapa puluh MB gagal dengan `Body, TimedOut`. Batas waktu
+    // connect dan read dipasang di clientnya (lihat `Installer::new`).
+    let response = client.get(url).send().await?.error_for_status()?;
     let total = response.content_length();
 
     let mut file = tokio::fs::File::create(dest_part).await?;
