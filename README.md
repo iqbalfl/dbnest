@@ -38,8 +38,11 @@ glibc requirement stays low enough for older distros.
 Needs glibc ≥ 2.28: Ubuntu 20.04+, Debian 11+, Fedora 36+, RHEL/Rocky 8+, Arch.
 musl-based distros (Alpine) are not supported.
 
-In practice, only the Debian family is exercised by CI today — see
-[Testing on the Debian family](#testing-on-the-debian-family).
+In practice CI exercises Ubuntu 24.04, Ubuntu 22.04 and Debian 12 — see
+[Testing on the Debian family](#testing-on-the-debian-family). Debian 11 still
+satisfies the glibc floor, but it is no longer provable in CI: bullseye left LTS
+in August 2026, and the `debian:11` image now ships security-updated packages
+that no remaining repository serves, so the container cannot be provisioned.
 
 ## CLI usage
 
@@ -147,9 +150,21 @@ Only x86_64 is built so far; aarch64 is waiting on an ARM runner.
 ## Testing on the Debian family
 
 The `integration` job in `ci.yml` (also manual) installs real engines from the
-manifest and runs them on Ubuntu 24.04, Ubuntu 22.04, Debian 12, and Debian 11.
-This is what demonstrates that binaries from `build-engines.yml` actually run on
-the target distros, rather than merely compiling.
+manifest and runs them on Ubuntu 24.04, Ubuntu 22.04, and Debian 12 — all four
+engines per leg, end to end: download, checksum, extract, initialise, start,
+query, stop, delete. This is what demonstrates that binaries from
+`build-engines.yml` actually run on the target distros, rather than merely
+compiling.
+
+Because dbnest's preflight refuses to run as root (DESIGN §8), the container
+legs compile the test binary as root and then execute it as an unprivileged
+user. The tests also pin the process backend to `direct`: they isolate every
+XDG path under a temporary directory, and a systemd unit written there is
+somewhere systemd never reads. Covering the systemd backend needs a separate,
+non-isolating test that does not exist yet.
+
+Debian 11 was dropped from the matrix — see
+[Supported distros](#supported-distros) for why.
 
 ## Data locations
 
@@ -230,6 +245,10 @@ The full design lives in [DESIGN.md](DESIGN.md).
 - MySQL 8.4.3's sha256 has not been cross-checked against an official upstream
   checksum (see [Engine manifest](#engine-manifest)); the others have.
 - MongoDB is not supported.
+- The systemd process backend has no integration test; only `direct` is
+  exercised. Relatedly, changing the backend in Settings does not rebind a
+  running app — `Manager` picks its backend once at construction, so the change
+  only takes effect after a restart, with nothing telling the user that.
 - No binary release yet. `release.yml` has been run to completion once and
   produced all four artifacts (AppImage, `.deb`, `.rpm`, CLI tarball), and the
   `.deb` installs cleanly via `dpkg -i`, but it has never run on a tag.
