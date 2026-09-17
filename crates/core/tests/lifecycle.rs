@@ -15,7 +15,7 @@
 //! (DESIGN §8), jadi di container CI yang berjalan sebagai root binary tesnya
 //! dijalankan lewat user tanpa hak istimewa.
 
-use dbnest_core::config::ProcessBackendKind;
+use dbnest_core::config::{ConfigStore, ProcessBackendKind};
 use dbnest_core::manager::{CreateInstanceRequest, Manager};
 use dbnest_core::model::{EngineKind, InstanceStatus};
 use dbnest_core::paths::Paths;
@@ -39,10 +39,25 @@ fn require_it_flag() {
 /// backendnya dipilih eksplisit ketimbang bergantung pada pemilihan `auto`
 /// yang hasilnya berbeda antar mesin.
 fn isolated_manager(root: &std::path::Path) -> Manager {
-    let manager = Manager::with_paths(Paths::under_root(root)).unwrap();
-    let mut settings = manager.get_settings().unwrap();
+    let paths = Paths::under_root(root);
+    paths.ensure_base_dirs().unwrap();
+
+    // Settings harus ditulis SEBELUM Manager dibuat. `Manager::with_paths`
+    // memanggil `select_backend()` sekali saat konstruksi, jadi mengubah
+    // settings lewat `update_settings()` setelahnya tidak mengganti backend
+    // yang sudah dipilih instance itu — percobaan pertama perbaikan ini gagal
+    // tepat karena itu.
+    let config = ConfigStore::new(paths.clone());
+    let mut settings = config.load_settings().unwrap();
     settings.process_backend = ProcessBackendKind::Direct;
-    manager.update_settings(settings).unwrap();
+    config.save_settings(&settings).unwrap();
+
+    let manager = Manager::with_paths(paths).unwrap();
+    assert!(
+        manager.is_direct_backend(),
+        "tes ini butuh backend direct, dapat: {}",
+        manager.backend_label()
+    );
     manager
 }
 

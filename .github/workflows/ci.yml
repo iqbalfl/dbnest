@@ -156,20 +156,31 @@ jobs:
             return 1
           }
 
-          # Debian 11 keluar dari LTS pada Agustus 2026, dan deb.debian.org
-          # tidak lagi melayani pool bullseye-security yang masih diiklankan
-          # indeks di image-nya: ketiga percobaan apt gagal 404 pada belasan
-          # berkas yang sama persis, jadi ini bukan mirror yang sesaat tidak
-          # sinkron. Arsip bullseye utama masih jalan (68 MB terunduh normal),
-          # jadi khusus rilis itu sumber security-nya dilepas dan paket dipasang
-          # dari main. Ini wajar untuk container CI sekali pakai — jangan
-          # ditiru untuk sistem yang hidup lama.
+          # Debian 11 keluar dari LTS pada Agustus 2026 dan sudah dipindah ke
+          # archive.debian.org; deb.debian.org tidak lagi melayani pool
+          # bullseye-security yang masih diiklankan indeks di image-nya
+          # (ketiga percobaan apt gagal 404 pada berkas yang sama persis, jadi
+          # bukan mirror yang sesaat tidak sinkron).
+          #
+          # Melepas sumber security saja tidak cukup: image-nya sudah memasang
+          # paket versi security (libc6 2.31-13+deb11u14) sementara main hanya
+          # punya u11, sehingga apt berhenti dengan dependensi tak terpenuhi.
+          # Jadi kedua sumber diarahkan ke arsip, yang masih punya pool
+          # lengkapnya. Release file di arsip sudah kedaluwarsa, karena itu
+          # Check-Valid-Until dimatikan — khusus container CI sekali pakai.
           if [ -r /etc/os-release ]; then
             . /etc/os-release
             if [ "${ID:-}" = debian ] && [ "${VERSION_CODENAME:-}" = bullseye ]; then
-              echo "Debian 11: melepas sumber bullseye-security yang sudah tidak dilayani"
-              $SUDO sed -i '/-security/d; /security\.debian\.org/d' \
-                /etc/apt/sources.list
+              echo "Debian 11: mengarahkan apt ke archive.debian.org"
+              printf '%s\n' \
+                'deb http://archive.debian.org/debian bullseye main' \
+                'deb http://archive.debian.org/debian-security bullseye-security main' \
+                | $SUDO tee /etc/apt/sources.list >/dev/null
+              $SUDO rm -f /etc/apt/sources.list.d/*.list \
+                /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+              printf '%s\n' \
+                'Acquire::Check-Valid-Until "false";' \
+                | $SUDO tee /etc/apt/apt.conf.d/99dbnest-archive >/dev/null
             fi
           fi
 
