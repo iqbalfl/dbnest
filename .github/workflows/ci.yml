@@ -120,6 +120,20 @@ jobs:
         # Target utama dulu: Debian dan turunannya. Tiap leg memasang engine
         # sungguhan dari manifest lalu menjalankannya, jadi ini yang benar-benar
         # membuktikan binary hasil build-engines.yml jalan di sana.
+        #
+        # Debian 11 sengaja tidak ada di sini. Bullseye keluar dari LTS pada
+        # Agustus 2026, dan image `debian:11` kini tidak bisa disiapkan lagi:
+        # ia sudah memasang paket versi security (libc6 2.31-13+deb11u14),
+        # sementara deb.debian.org dan archive.debian.org hanya menyediakan
+        # u11 di suite `bullseye` — dan `bullseye-security` sudah tidak punya
+        # Release file di keduanya (404). Jadi tidak ada repo yang menyajikan
+        # kumpulan paket yang konsisten untuk image itu; tiga percobaan
+        # berbeda gagal karena itu, bukan karena dbnest.
+        #
+        # Binary engine-nya sendiri tetap memenuhi syarat Debian 11 (butuh
+        # glibc >= 2.28, bullseye punya 2.31) — yang hilang adalah kemampuan
+        # membuktikannya di CI. Kalau leg ini mau dikembalikan, perlu image
+        # dengan digest lama yang paketnya masih cocok dengan suite `bullseye`.
         include:
           - label: ubuntu-24.04 (runner)
             container: ""
@@ -127,8 +141,6 @@ jobs:
             container: ubuntu:22.04
           - label: debian 12
             container: debian:12
-          - label: debian 11
-            container: debian:11
     steps:
       - name: Install system dependencies
         run: |
@@ -136,11 +148,12 @@ jobs:
           SUDO=""
           [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
-          # Indeks apt dan isi pool di deb.debian.org bisa sesaat tidak sinkron
-          # — leg Debian 11 pernah gagal dengan 404 pada belasan berkas
-          # bullseye-security tepat setelah `apt-get update` sukses. Karena itu
-          # setiap pemasangan dicoba beberapa kali dengan indeks yang di-refresh
-          # ulang, bukan sekali lalu menyerah.
+          # Indeks apt dan isi pool mirror bisa sesaat tidak sinkron: sebuah
+          # leg pernah gagal 404 pada belasan berkas tepat setelah
+          # `apt-get update` sukses. Karena itu setiap pemasangan dicoba
+          # beberapa kali dengan indeks yang di-refresh ulang, bukan sekali
+          # lalu menyerah. (Yang itu ternyata bukan mirror skew, tapi ulangan
+          # ini tetap berguna untuk kasus yang benar-benar sesaat.)
           apt_install() {
             attempt=1
             while [ "$attempt" -le 3 ]; do
@@ -173,4 +186,30 @@ jobs:
       - name: Engine lifecycle (all four engines)
         env:
           DBNEST_IT: "1"
-        run: cargo test -p dbnest-core -- --ignored --test-threads=1
+        run: |
+          set -eu
+          # dbnest menolak berjalan sebagai root lewat preflight (DESIGN §8),
+          # dan container di sini berjalan sebagai root. Yang menyesuaikan
+          # adalah tesnya, bukan preflightnya: binary tes dikompilasi sebagai
+          # root lalu dijalankan sebagai user tanpa hak istimewa. Leg runner
+          # non-container sudah non-root, jadi langsung jalan.
+          if [ "$(id -u)" -ne 0 ]; then
+            cargo test -p dbnest-core -- --ignored --test-threads=1
+            exit 0
+          fi
+
+          cargo test -p dbnest-core --test lifecycle --no-run
+          BIN="$(find target/debug/deps -maxdepth 1 -type f -executable \
+            -name 'lifecycle-*' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
+          if [ -z "$BIN" ]; then
+            echo "::error::binary tes lifecycle tidak ditemukan setelah --no-run"
+            exit 1
+          fi
+          echo "menjalankan $BIN sebagai user tanpa hak istimewa"
+
+          id -u dbnestci >/dev/null 2>&1 || useradd -m dbnestci
+          # Binary dan pohon target harus terbaca user itu; /tmp dipakai untuk
+          # tempdir tiap tes dan sudah writable untuk semua.
+          chmod -R a+rX target/debug/deps
+          chmod a+rX . target target/debug
+          su dbnestci -s /bin/bash -c "DBNEST_IT=1 '$PWD/$BIN' --ignored --test-threads=1"
