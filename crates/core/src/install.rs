@@ -176,6 +176,40 @@ fn extract_tar<R: Read>(reader: R, dest_dir: &Path, strip_components: u32) -> Re
 
         if entry.header().entry_type().is_dir() {
             std::fs::create_dir_all(&dest_path)?;
+        } else if entry.header().entry_type() == tar::EntryType::Link {
+            // Hard link: nama target di header relatif terhadap akar arsip,
+            // sedangkan `Entry::unpack` menafsirkannya relatif terhadap
+            // direktori kerja proses — jadi target diselesaikan sendiri, dengan
+            // strip_components dan validasi yang sama seperti path entri.
+            // PostgreSQL memakai hard link besar-besaran di share/timezone,
+            // jadi tanpa ini tarball-nya gagal diekstrak.
+            let raw_link = entry
+                .link_name()?
+                .ok_or_else(|| {
+                    Error::Other(format!(
+                        "hard link tanpa target di arsip: {}",
+                        raw_path.display()
+                    ))
+                })?
+                .into_owned();
+            let link_relative =
+                safe_relative_path(&raw_link, strip_components)?.ok_or_else(|| {
+                    Error::Other(format!(
+                        "hard link menunjuk ke luar arsip: {}",
+                        raw_link.display()
+                    ))
+                })?;
+            let link_target = dest_dir.join(&link_relative);
+            if !link_target.starts_with(dest_dir) {
+                return Err(Error::Other(format!(
+                    "hard link menunjuk ke luar tujuan ekstraksi: {}",
+                    raw_link.display()
+                )));
+            }
+            if let Some(parent) = dest_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::hard_link(&link_target, &dest_path)?;
         } else {
             if let Some(parent) = dest_path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -253,6 +287,84 @@ mod tests {
         extract_archive(&archive_path, &dest, "tar.gz", 1).unwrap();
 
         assert!(dest.join("bin/redis-server").exists());
+    }
+
+    /// Membuat arsip berisi satu berkas biasa dan satu hard link ke berkas itu,
+    /// dengan nama target relatif terhadap akar arsip — persis seperti tarball
+    /// PostgreSQL di `share/timezone`.
+    fn build_tar_gz_with_hard_link(
+        file_path: &str,
+        contents: &str,
+        link_path: &str,
+        link_target: &str,
+    ) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            builder
+                .append_data(&mut header, file_path, contents.as_bytes())
+                .unwrap();
+
+            let mut link_header = tar::Header::new_gnu();
+            link_header.set_size(0);
+            link_header.set_mode(0o644);
+            link_header.set_entry_type(tar::EntryType::Link);
+            link_header.set_link_name(link_target).unwrap();
+            builder
+                .append_data(&mut link_header, link_path, std::io::empty())
+                .unwrap();
+
+            builder.finish().unwrap();
+        }
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&tar_bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn extract_archive_resolves_hard_links_after_strip_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_path = tmp.path().join("archive.tar.gz");
+        std::fs::write(
+            &archive_path,
+            build_tar_gz_with_hard_link(
+                "postgres-16.4/share/timezone/Pacific/Wake",
+                "tzdata",
+                "postgres-16.4/share/timezone/Pacific/Wallis",
+                "postgres-16.4/share/timezone/Pacific/Wake",
+            ),
+        )
+        .unwrap();
+
+        let dest = tmp.path().join("dest");
+        extract_archive(&archive_path, &dest, "tar.gz", 1).unwrap();
+
+        let linked = dest.join("share/timezone/Pacific/Wallis");
+        assert!(linked.exists(), "hard link tidak dibuat");
+        assert_eq!(std::fs::read_to_string(linked).unwrap(), "tzdata");
+    }
+
+    #[test]
+    fn extract_archive_rejects_hard_link_outside_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_path = tmp.path().join("archive.tar.gz");
+        std::fs::write(
+            &archive_path,
+            build_tar_gz_with_hard_link("root/file", "data", "root/evil", "../../etc/passwd"),
+        )
+        .unwrap();
+
+        let dest = tmp.path().join("dest");
+        let err = extract_archive(&archive_path, &dest, "tar.gz", 1).unwrap_err();
+        assert!(
+            err.to_string().contains("path traversal"),
+            "pesan tak terduga: {err}"
+        );
     }
 
     #[test]

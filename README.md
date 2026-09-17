@@ -81,11 +81,12 @@ menolak memasang engine dengan pesan "belum diverifikasi".
 
 Supaya instalasi otomatis berjalan, seseorang perlu:
 
-1. Menyiapkan tarball engine (lihat §5.2 DESIGN.md untuk sumber tiap engine —
-   MySQL/MariaDB punya tarball resmi; PostgreSQL dan Redis perlu build sendiri
-   di glibc 2.28, mis. container `almalinux:8`).
+1. Menyiapkan tarball engine (lihat §5.2 DESIGN.md untuk sumber tiap engine).
+   MySQL dan MariaDB punya tarball resmi yang tinggal dipakai. PostgreSQL dan
+   Redis tidak, jadi keduanya dibangun lewat workflow
+   [`build-engines.yml`](#membangun-binary-engine) di bawah.
 2. Menghitung sha256-nya, mengisi `manifest/manifest.json`, dan mengubah
-   `"verified"` jadi `true`.
+   `"verified"` jadi `true`. `build-engines.yml` melakukan ini lewat PR.
 3. Meng-host manifest itu (GitHub Pages/Releases) lalu mengisi **Manifest URL**
    di Settings — atau cukup memperbarui manifest bawaan lalu build ulang.
 
@@ -94,7 +95,38 @@ mengambilnya saat dibuka atau lewat tombol **Refresh versions**, tanpa perlu
 rilis ulang.
 
 Semua artefak diverifikasi sha256-nya sebelum diekstrak, dan ekstraksi menolak
-entri arsip berpath absolut atau mengandung `..`.
+entri arsip berpath absolut atau mengandung `..` — termasuk untuk target hard
+link.
+
+## Membangun binary engine
+
+`.github/workflows/build-engines.yml` (jalankan manual lewat **Run workflow**)
+membangun Redis dan PostgreSQL di container AlmaLinux 8, mengunggah tarball-nya
+ke Releases repo ini, lalu membuka PR yang mengisi `manifest/manifest.json`
+dengan url dan sha256 hasil build. Alurnya mengikuti DESIGN.md §19.
+
+AlmaLinux 8 dipakai karena glibc-nya 2.28 — yang tertua di antara distro yang
+didukung. `scripts/check-portable.sh` menegakkan janji itu: build gagal kalau
+ada binary yang menuntut glibc lebih baru, atau menaut library yang SONAME-nya
+berbeda antar distro. Karena itu PostgreSQL dibangun tanpa ICU, readline, dan
+OpenSSL (SONAME ketiganya berbeda antara EL8 dan Ubuntu 24.04); konsekuensinya
+`psql` tidak punya line editing.
+
+Tiap build juga di-smoke test sebelum dipaketkan: Redis dijalankan lalu
+di-`PING`, dan PostgreSQL di-`initdb` serta di-query sebagai user biasa dari
+direktori yang berbeda dari prefix build-nya, sekaligus membuktikan pohonnya
+relokatabel.
+
+Sumber PostgreSQL diverifikasi terhadap berkas `.sha256` resmi dari
+postgresql.org. Upstream Redis tidak menerbitkan berkas checksum yang bisa
+diambil otomatis, jadi sha256 tarball sumbernya hanya dicatat di log — cocokkan
+sekali dengan halaman unduhan Redis, lalu isikan ke input `redis_src_sha256`
+supaya build berikutnya menolak sumber yang berubah.
+
+Prasyarat: **Settings → Actions → General → "Allow GitHub Actions to create and
+approve pull requests"** harus aktif supaya langkah PR manifest berhasil.
+
+Arsitektur yang dibangun baru x86_64; aarch64 menunggu runner ARM.
 
 ## Lokasi data
 
@@ -170,7 +202,11 @@ Rancangan lengkap ada di [DESIGN.md](DESIGN.md).
 ## Yang belum selesai
 
 - Manifest belum berisi artefak terverifikasi (lihat di atas) — ini yang
-  menghalangi instalasi engine otomatis dan tes integrasi.
+  menghalangi instalasi engine otomatis dan tes integrasi. `build-engines.yml`
+  sudah ada untuk mengisinya, tapi belum pernah dijalankan.
+- `build-engines.yml` baru membangun Redis dan PostgreSQL untuk x86_64. MySQL
+  dan MariaDB memakai tarball resmi, jadi url dan sha256-nya masih perlu diisi
+  dengan tangan.
 - MongoDB belum didukung.
 - Belum ada rilis biner. Ketiga bundle (AppImage, `.deb`, `.rpm`) sudah terbukti
   bisa dibangun dan `.deb`-nya terpasang bersih lewat `dpkg -i`, tapi
